@@ -16,5 +16,12 @@ obj/
 *.fatbin
 *.ptx
 
+# Metal build files
+*.metallib
+*.air
+
 # Scripts
 scripts/
+
+# macOS
+.DS_Store
