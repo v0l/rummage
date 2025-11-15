@@ -1,7 +1,6 @@
-<div style="display: flex; align-items: center; gap: 16px;">
-  <img src="assets/iconx128.png" alt="Rummage" width="64">
-  <h1 style="margin: 0;">Rummage</h1>
-</div>
+<h1>
+<img src="assets/iconx128.png" alt="Rummage" width="64" align="middle"> Rummage
+</h1>
 
 ## Overview
 
