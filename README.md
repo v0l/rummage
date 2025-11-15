@@ -1,9 +1,7 @@
 <h1>
-  <img src="assets/iconx128.png" alt="Rummage" width="64" style="vertical-align: middle;">
-  Rummage
+  <img src="assets/iconx128.png" alt="Rummage" width="64" style="vertical-align: middle; display: inline-block;">
+  <span style="vertical-align: middle; display: inline-block;">Rummage</span>
 </h1>
-
-GPU-accelerated npub miner using CUDA.
 
 ## Overview
 
