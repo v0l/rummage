@@ -4,7 +4,8 @@
 # Rummage
 </div>
 
-Rummage is a miner which runs an exhaustive search for Nostr keys with custom prefixes or suffixes in the npub or hex address. It's designed to run on GPU and can search tens of millions of keys per second on any decent NVIDIA card.
+Rummage is a high-performance Nostr vanity miner that exhaustively searches the secp256k1 keyspace to generate custom prefixes or suffixes in either Bech32 npub format or raw hex. It’s built for NVIDIA GPUs using CUDA and can sustain tens of millions of key attempts per second on a single consumer card.
+
 
 ## Requirements
 
