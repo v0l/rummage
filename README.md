@@ -1,10 +1,6 @@
-<h1>
-<img src="assets/iconx128.png" alt="Rummage" width="64" align="middle"> Rummage
-</h1>
+# Rummage
 
-## Overview
-
-Rummage searches for Nostr keys with custom prefixes or suffixes in the npub or hex address. It uses your GPU to generate and test millions of keys per second.
+Rummage is a miner which runs an exhaustive search for Nostr keys with custom prefixes or suffixes in the npub or hex address. It's designed to run on GPU and can search tens of millions of keys per second on any decent NVIDIA card.
 
 ## Requirements
 
