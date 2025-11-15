@@ -1,0 +1,20 @@
+# Checkpoint files
+checkpoint.txt
+*.checkpoint
+
+# Output files
+keys.txt
+
+# Build artifacts
+rummage
+obj/
+*.o
+*.a
+
+# CUDA build files
+*.cubin
+*.fatbin
+*.ptx
+
+# Scripts
+scripts/
