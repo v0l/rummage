@@ -29,6 +29,8 @@ NVCC      = $(CUDA)/bin/nvcc
 
 #--------------------------------------------------------------------
 
+all: rummage
+
 $(OBJDIR)/GPU/GPURummage.o: $(SRCDIR)/GPU/GPURummage.cu
 	$(NVCC) -allow-unsupported-compiler --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(SRCDIR) -I$(CUDA)/include -gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/GPURummage.o -c $(SRCDIR)/GPU/GPURummage.cu
 
@@ -37,8 +39,6 @@ $(OBJDIR)/%.o : $(SRCDIR)/%.cpp
 
 $(OBJDIR)/CPU/%.o : $(SRCDIR)/CPU/%.cpp
 	$(CXX) $(CXXFLAGS) -o $@ -c $<
-
-all: rummage
 
 rummage: $(OBJET)
 	@echo Making rummage...
