@@ -1,5 +1,5 @@
 <h1>
-  <img src="iconx128.png" alt="Rummage" width="128" align="left">
+  <img src="assets/iconx128.png" alt="Rummage" width="128" align="left">
   Rummage
 </h1>
 
