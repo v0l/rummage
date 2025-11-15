@@ -1,7 +1,7 @@
-<h1>
-  <img src="assets/iconx128.png" alt="Rummage" width="64" style="vertical-align: middle; display: inline-block;">
-  <span style="vertical-align: middle; display: inline-block;">Rummage</span>
-</h1>
+<div style="display: flex; align-items: center; gap: 16px;">
+  <img src="assets/iconx128.png" alt="Rummage" width="64">
+  <h1 style="margin: 0;">Rummage</h1>
+</div>
 
 ## Overview
 
