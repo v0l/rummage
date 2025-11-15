@@ -1,4 +1,9 @@
-# Rummage
+<h1>
+  <img src="iconx128.png" alt="Rummage" width="128" align="left">
+  Rummage
+</h1>
+
+<br clear="left"/>
 
 GPU-accelerated npub miner using CUDA.
 
@@ -38,6 +43,8 @@ Sequential exhaustive search (resumable):
 ./rummage --npub-prefix satoshi --sequential
 ```
 
+To learn more about how search modes work in Rummage, see [docs/SEARCH.md](docs/SEARCH.md).
+
 ## Options
 
 **Bech32 Mode** (searches npub address):
@@ -56,12 +63,9 @@ Sequential exhaustive search (resumable):
 
 By default, random search mode is used (faster for short patterns).
 
-To learn more about how search modes work in Rummage, see [docs/SEARCH.md](docs/SEARCH.md).
 
 ## Output
 
 Found keys are saved to `keys.txt` with private key, public key, and npub address.
 
-## License
 
-MIT License - Copyright (c) 2025 rossbates
