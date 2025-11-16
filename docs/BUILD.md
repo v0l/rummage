@@ -2,6 +2,8 @@
 
 This document explains how to build and configure Rummage for your specific GPU.
 
+For known good configurations and performance results, see [PERFORMANCE.md](PERFORMANCE.md).
+
 ## Prerequisites
 
 ### Linux (CUDA)
