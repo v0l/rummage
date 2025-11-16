@@ -7,7 +7,7 @@ This document tracks GPU performance results for Rummage with various configurat
 | GPU Model | Compute Capability | CUDA Version | Blocks per Grid | Threads per Block | Keys per Thread | M keys/sec | Notes |
 |-----------|-------------------|--------------|-----------------|-------------------|-----------------|-------------|-------|
 | RTX 3070 | 86 | 11.8 | 512 | 256 | 64 | 42 | Default config for RTX 30-series |
-| H200 | 90 | 12.9 | 2816 | 256 | 64 | 170 | 20x SM count (141 SMs), ~4x performance improvement |
+| H200 | 90 | 12.9 | 2816 | 256 | 64 | 170 | 20x SM count (141 SMs) |
 
 ## Configuration Guidelines
 

@@ -4,7 +4,11 @@
 # Rummage
 </div>
 
-Rummage is a high-performance Nostr vanity miner that exhaustively searches the secp256k1 keyspace to generate custom prefixes or suffixes in either Bech32 npub format or raw hex. It’s built for NVIDIA GPUs using CUDA and can sustain tens of millions of key attempts per second on a single consumer card.
+Rummage is a high-performance Nostr vanity address miner that searches the secp256k1 keyspace to generate custom prefixes or suffixes in either Bech32 npub format or raw hex. It supports both random sampling and exhaustive sequential search modes.
+
+It's built for NVIDIA GPUs using CUDA and can sustain 42M+ keys/second on a consumer card (RTX 3070, Ampere architecture) and 170M+ keys/second on a datacenter card (H200, Hopper architecture).
+
+There is also an experimental build for Apple Silicon in the Metal branch. This is a ground-up implementation in Metal Shading Language, as no existing secp256k1 libraries are available for Metal. Currently it can do about 9M+ keys/second on a 2021 M1.
 
 
 ## Requirements
