@@ -614,18 +614,19 @@ void GPURummage::doIteration(uint64_t iteration) {
     keysGenerated += NOSTR_COUNT_CUDA_THREADS * KEYS_PER_THREAD_BATCH;
 }
 
-// CPU-side bech32 encoder (for display purposes)
-void encode_npub_cpu(uint8_t *pubkey_32bytes, char *npub_out) {
+// Generic bech32 encoder (for display purposes)
+void encode_bech32_cpu(uint8_t *key_32bytes, const char *hrp, char *output) {
     const char *bech32_charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    int hrp_len = strlen(hrp);
 
-    // Convert pubkey to 5-bit groups
+    // Convert key to 5-bit groups
     uint8_t data5[52];
     int data5_len = 0;
     uint32_t acc = 0;
     int bits = 0;
 
     for (int i = 0; i < 32; i++) {
-        acc = ((acc << 8) | pubkey_32bytes[i]) & 0x1fff;
+        acc = ((acc << 8) | key_32bytes[i]) & 0x1fff;
         bits += 8;
         while (bits >= 5) {
             bits -= 5;
@@ -636,16 +637,35 @@ void encode_npub_cpu(uint8_t *pubkey_32bytes, char *npub_out) {
         data5[data5_len++] = (acc << (5 - bits)) & 31;
     }
 
-    // Create values array for checksum
-    uint8_t values[63];
-    values[0] = 3; values[1] = 3; values[2] = 3; values[3] = 3; values[4] = 16;
-    for (int i = 0; i < data5_len; i++) values[5 + i] = data5[i];
-    for (int i = 0; i < 6; i++) values[5 + data5_len + i] = 0;
+    // Create values array for checksum (HRP expansion + data + 6 zeros)
+    uint8_t values[100];  // Enough for any HRP
+    int val_idx = 0;
+
+    // HRP expansion: high bits
+    for (int i = 0; i < hrp_len; i++) {
+        values[val_idx++] = hrp[i] >> 5;
+    }
+    values[val_idx++] = 0;  // Separator
+
+    // HRP expansion: low bits
+    for (int i = 0; i < hrp_len; i++) {
+        values[val_idx++] = hrp[i] & 31;
+    }
+
+    // Data
+    for (int i = 0; i < data5_len; i++) {
+        values[val_idx++] = data5[i];
+    }
+
+    // 6 zeros for checksum calculation
+    for (int i = 0; i < 6; i++) {
+        values[val_idx++] = 0;
+    }
 
     // Calculate checksum
     uint32_t chk = 1;
     uint32_t GEN[5] = {0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3};
-    for (int i = 0; i < 5 + data5_len + 6; i++) {
+    for (int i = 0; i < val_idx; i++) {
         uint8_t top = chk >> 25;
         chk = (chk & 0x1ffffff) << 5 ^ values[i];
         for (int j = 0; j < 5; j++) {
@@ -658,10 +678,29 @@ void encode_npub_cpu(uint8_t *pubkey_32bytes, char *npub_out) {
     uint8_t checksum[6];
     for (int i = 0; i < 6; i++) checksum[i] = (chk >> (5 * (5 - i))) & 31;
 
-    // Encode to bech32 charset
-    for (int i = 0; i < data5_len; i++) npub_out[i] = bech32_charset[data5[i]];
-    for (int i = 0; i < 6; i++) npub_out[data5_len + i] = bech32_charset[checksum[i]];
-    npub_out[data5_len + 6] = '\0';
+    // Build output: hrp + "1" + data + checksum
+    int out_idx = 0;
+    for (int i = 0; i < hrp_len; i++) {
+        output[out_idx++] = hrp[i];
+    }
+    output[out_idx++] = '1';
+    for (int i = 0; i < data5_len; i++) {
+        output[out_idx++] = bech32_charset[data5[i]];
+    }
+    for (int i = 0; i < 6; i++) {
+        output[out_idx++] = bech32_charset[checksum[i]];
+    }
+    output[out_idx] = '\0';
+}
+
+// Wrapper for npub encoding
+void encode_npub_cpu(uint8_t *pubkey_32bytes, char *npub_out) {
+    encode_bech32_cpu(pubkey_32bytes, "npub", npub_out);
+}
+
+// Wrapper for nsec encoding
+void encode_nsec_cpu(uint8_t *privkey_32bytes, char *nsec_out) {
+    encode_bech32_cpu(privkey_32bytes, "nsec", nsec_out);
 }
 
 bool GPURummage::checkAndPrintResults() {
@@ -718,18 +757,19 @@ bool GPURummage::checkAndPrintResults() {
             }
             printf("\n");
 
+            char nsec[100];
+            encode_nsec_cpu(privKey, nsec);
+            printf("Private Key (nsec): %s\n", nsec);
+
             printf("Public Key (hex):  ");
             for (int i = 0; i < SIZE_PUBKEY_NOSTR; i++) {
                 printf("%02x", pubKey[i]);
             }
             printf("\n");
 
-            // If we verified bech32 or in bech32 mode, also display the npub
-            if (needsBech32Verification || vanityMode >= VANITY_BECH32_PREFIX) {
-                char npub[64];
-                encode_npub_cpu(pubKey, npub);
-                printf("Public Key (npub): npub1%s\n", npub);
-            }
+            char npub[100];
+            encode_npub_cpu(pubKey, npub);
+            printf("Public Key (npub):  %s\n", npub);
 
             printf("Total keys searched: %lu\n", keysGenerated);
             printf("=================================\n\n");
@@ -743,19 +783,14 @@ bool GPURummage::checkAndPrintResults() {
                     fprintf(file, "%02x", privKey[i]);
                 }
                 fprintf(file, "\n");
+                fprintf(file, "Private Key (nsec): %s\n", nsec);
 
                 fprintf(file, "Public Key (hex):  ");
                 for (int i = 0; i < SIZE_PUBKEY_NOSTR; i++) {
                     fprintf(file, "%02x", pubKey[i]);
                 }
                 fprintf(file, "\n");
-
-                // If we verified bech32 or in bech32 mode, also write the npub
-                if (needsBech32Verification || vanityMode >= VANITY_BECH32_PREFIX) {
-                    char npub[64];
-                    encode_npub_cpu(pubKey, npub);
-                    fprintf(file, "Public Key (npub): npub1%s\n", npub);
-                }
+                fprintf(file, "Public Key (npub):  %s\n", npub);
 
                 fprintf(file, "Total keys searched: %lu\n", keysGenerated);
                 fprintf(file, "=================================\n\n");
