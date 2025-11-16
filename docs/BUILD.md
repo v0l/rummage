@@ -134,31 +134,39 @@ Check your CUDA version:
 nvcc --version
 ```
 
-## GPU Thread Configuration
+## GPU Performance Tuning
 
-For optimal performance, tune these parameters in `src/GPU/GPURummage.h`:
+For optimal performance, tune these parameters in the Makefile:
 
-**Lines 13-15:**
-```c
-#define NOSTR_BLOCKS_PER_GRID 512
-#define NOSTR_THREADS_PER_BLOCK 256
-#define KEYS_PER_THREAD_BATCH 64
+**In Makefile, lines 29-31:**
+```make
+NOSTR_BLOCKS_PER_GRID   = 512
+NOSTR_THREADS_PER_BLOCK = 256
+KEYS_PER_THREAD_BATCH   = 64
 ```
 
 **Guidelines:**
 - `NOSTR_BLOCKS_PER_GRID`: Set to 16-32x your GPU's SM count
-  - Find SM count: `nvidia-smi --query-gpu=count --format=csv`
-  - RTX 3060: 28 SMs → use 512 blocks
-  - RTX 4090: 128 SMs → try 2048+ blocks
+  - Find SM count: `nvidia-smi --query-gpu=compute_cap --format=csv`
+  - RTX 3060 (28 SMs) → use 512 blocks (18x)
+  - RTX 3070 (46 SMs) → use 512-1024 blocks
+  - RTX 4090 (128 SMs) → use 2048-4096 blocks (16-32x)
+  - Tesla P100 (56 SMs) → use 1120 blocks (20x)
+  - H200 (141 SMs) → use 2816 blocks (20x)
 
 - `NOSTR_THREADS_PER_BLOCK`: Usually optimal at 256
-  - Lower values (128): Better for complex kernels
-  - Higher values (512): Better for simple operations
+  - This is the number of threads per block
+  - 256 works well for most GPUs
+  - Don't change unless you have specific performance data
 
 - `KEYS_PER_THREAD_BATCH`: Keys generated per thread per iteration
   - Higher values: More throughput but more memory
   - Lower values: Less memory usage
-  - Start with 64, adjust based on performance
+  - 64 is a good default for all GPUs
+
+**Total thread count:** `NOSTR_BLOCKS_PER_GRID × NOSTR_THREADS_PER_BLOCK`
+- RTX 3070 (512 × 256): 131,072 threads
+- H200 (2816 × 256): 720,896 threads
 
 ## Rebuild After Changes
 

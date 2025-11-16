@@ -23,7 +23,17 @@ CCAP      = 86
 CUDA      = /usr/local/cuda-11.8
 CXX       = g++
 CXXCUDA   = /usr/bin/g++
-CXXFLAGS  = -DWITHGPU -m64 -mssse3 -Wno-write-strings -O2 -I$(SRCDIR) -I$(CUDA)/include
+
+# GPU Performance Configuration
+# Adjust these based on your GPU (see docs/PERFORMANCE.md)
+NOSTR_BLOCKS_PER_GRID   = 512
+NOSTR_THREADS_PER_BLOCK = 256
+KEYS_PER_THREAD_BATCH   = 64
+
+CXXFLAGS  = -DWITHGPU -m64 -mssse3 -Wno-write-strings -O2 -I$(SRCDIR) -I$(CUDA)/include \
+            -DNOSTR_BLOCKS_PER_GRID=$(NOSTR_BLOCKS_PER_GRID) \
+            -DNOSTR_THREADS_PER_BLOCK=$(NOSTR_THREADS_PER_BLOCK) \
+            -DKEYS_PER_THREAD_BATCH=$(KEYS_PER_THREAD_BATCH)
 LFLAGS    = /usr/lib/x86_64-linux-gnu/libgmp.so.10 -lpthread -L$(CUDA)/lib64 -lcudart -lcurand
 NVCC      = $(CUDA)/bin/nvcc
 
@@ -32,7 +42,11 @@ NVCC      = $(CUDA)/bin/nvcc
 all: rummage
 
 $(OBJDIR)/GPU/GPURummage.o: $(SRCDIR)/GPU/GPURummage.cu
-	$(NVCC) -allow-unsupported-compiler --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(SRCDIR) -I$(CUDA)/include -gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/GPURummage.o -c $(SRCDIR)/GPU/GPURummage.cu
+	$(NVCC) -allow-unsupported-compiler --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(SRCDIR) -I$(CUDA)/include \
+	-DNOSTR_BLOCKS_PER_GRID=$(NOSTR_BLOCKS_PER_GRID) \
+	-DNOSTR_THREADS_PER_BLOCK=$(NOSTR_THREADS_PER_BLOCK) \
+	-DKEYS_PER_THREAD_BATCH=$(KEYS_PER_THREAD_BATCH) \
+	-gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/GPURummage.o -c $(SRCDIR)/GPU/GPURummage.cu
 
 $(OBJDIR)/%.o : $(SRCDIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -o $@ -c $<
