@@ -693,12 +693,15 @@ void encode_bech32_cpu(uint8_t *key_32bytes, const char *hrp, char *output) {
     output[out_idx] = '\0';
 }
 
-// Wrapper for npub encoding
+// Wrapper for npub encoding (returns just data part, no "npub1" prefix)
 void encode_npub_cpu(uint8_t *pubkey_32bytes, char *npub_out) {
-    encode_bech32_cpu(pubkey_32bytes, "npub", npub_out);
+    char full[100];
+    encode_bech32_cpu(pubkey_32bytes, "npub", full);
+    // Skip "npub1" prefix (5 chars) to return just the data+checksum part
+    strcpy(npub_out, full + 5);
 }
 
-// Wrapper for nsec encoding
+// Wrapper for nsec encoding (returns full nsec1... string)
 void encode_nsec_cpu(uint8_t *privkey_32bytes, char *nsec_out) {
     encode_bech32_cpu(privkey_32bytes, "nsec", nsec_out);
 }
@@ -769,7 +772,7 @@ bool GPURummage::checkAndPrintResults() {
 
             char npub[100];
             encode_npub_cpu(pubKey, npub);
-            printf("Public Key (npub):  %s\n", npub);
+            printf("Public Key (npub):  npub1%s\n", npub);
 
             printf("Total keys searched: %lu\n", keysGenerated);
             printf("=================================\n\n");
@@ -790,7 +793,7 @@ bool GPURummage::checkAndPrintResults() {
                     fprintf(file, "%02x", pubKey[i]);
                 }
                 fprintf(file, "\n");
-                fprintf(file, "Public Key (npub):  %s\n", npub);
+                fprintf(file, "Public Key (npub):  npub1%s\n", npub);
 
                 fprintf(file, "Total keys searched: %lu\n", keysGenerated);
                 fprintf(file, "=================================\n\n");
