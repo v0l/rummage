@@ -68,4 +68,14 @@ By default, random search mode is used (faster for short patterns).
 
 Found keys are saved to `keys.txt` with private key, public key, and npub address.
 
+## What is Nostr?
+Perhaps you stumbled upon this project and have no idea what on earth is going on here. 
+
+Quick explanation: Nostr is a decentralized protocol where your identity is a cryptographic key pair, not an account on someone else's server. Your npub (public key) is your permanent identifier across the network. Think of it like a username that no company can take away, suspend, or ban.
+
+Unlike traditional platforms where @yourname can disappear if the service shuts down or decides they don't like you, your Nostr identity is yours forever. A vanity npub is not necessary, but it lets you claim something readable and memorable (like npub1alice...) instead of a random string. It's a little nerdy, but suitable for those who perk up when they hear terms like sovereign identity.
+
+An npub is not just an identifier, it's how you log in to a growing number of apps in the Nostr ecosystem. Think "Sign in with Google," except there is no Google. Just you and the math.
+
+
 
