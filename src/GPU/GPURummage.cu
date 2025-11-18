@@ -183,10 +183,15 @@ __device__ bool matchesHexPattern(uint64_t *pubkey, uint8_t *pattern, uint8_t pa
     uint8_t *pubkeyBytes = (uint8_t *)pubkey;
     char hex[2];
 
+    // NOTE: pubkey is stored in little-endian format, but we display/search in big-endian
+    // So for prefix search, we need to check from the END of the byte array (reversed)
+    // And for suffix search, we check from the START (reversed)
+
     if (isPrefix) {
-        // Check prefix match
+        // Check prefix match - read from END of array backwards (big-endian display)
         for (uint8_t i = 0; i < patternLen; i++) {
-            byteToHex(pubkeyBytes[i / 2], hex);
+            int byteIdx = 31 - (i / 2);  // Start from byte 31 and work backwards
+            byteToHex(pubkeyBytes[byteIdx], hex);
             if (i % 2 == 0) {
                 if (hex[0] != pattern[i]) return false;
             } else {
@@ -194,13 +199,12 @@ __device__ bool matchesHexPattern(uint64_t *pubkey, uint8_t *pattern, uint8_t pa
             }
         }
     } else {
-        // Check suffix match
-        int pubkeyByteLen = 32; // x-only pubkey is 32 bytes = 64 hex chars
-        int startByte = pubkeyByteLen - ((patternLen + 1) / 2);
+        // Check suffix match - read from START of array (big-endian display)
+        int startByte = (patternLen + 1) / 2 - 1;  // Start from beginning
         int startChar = (patternLen % 2 == 1) ? 1 : 0;
 
         for (uint8_t i = 0; i < patternLen; i++) {
-            int byteIdx = startByte + (i + startChar) / 2;
+            int byteIdx = startByte - (i + startChar) / 2;  // Work from start
             byteToHex(pubkeyBytes[byteIdx], hex);
             if ((i + startChar) % 2 == 0) {
                 if (hex[0] != pattern[i]) return false;
@@ -325,9 +329,14 @@ __global__ void CudaNostrVanityMineSequential(
                       matchesHexPattern(qx, vanityPatternGPU + halfLen, vanityLen - halfLen, false);
         } else if (vanityMode == 3 || vanityMode == 4 || vanityMode == 5) {
             // VANITY_BECH32_PREFIX, VANITY_BECH32_SUFFIX, VANITY_BECH32_BOTH
+            // Convert qx from little-endian to big-endian for Nostr
+            uint8_t pubkey_be[32];
             uint8_t *qxBytes = (uint8_t *)qx;
+            for (int i = 0; i < 32; i++) {
+                pubkey_be[i] = qxBytes[31 - i];
+            }
             char npub[64];
-            encode_npub(qxBytes, npub);
+            encode_npub(pubkey_be, npub);
 
             if (vanityMode == 3) {
                 matched = matchesBech32Pattern(npub, vanityPatternGPU, vanityLen, true);
@@ -350,9 +359,11 @@ __global__ void CudaNostrVanityMineSequential(
             }
 
             // Copy public key (x-only) to output
+            // NOTE: qx is stored as uint64_t[4] in little-endian format, but Nostr
+            // expects big-endian byte order, so we reverse the bytes
             uint8_t *qxBytes = (uint8_t *)qx;
             for (int i = 0; i < SIZE_PUBKEY_NOSTR; i++) {
-                outputPubKeysGPU[(idxThread * SIZE_PUBKEY_NOSTR) + i] = qxBytes[i];
+                outputPubKeysGPU[(idxThread * SIZE_PUBKEY_NOSTR) + i] = qxBytes[31 - i];
             }
 
             break;  // Found a match, stop checking this batch
@@ -421,9 +432,14 @@ __global__ void CudaNostrVanityMine(
             // VANITY_BECH32_PREFIX, VANITY_BECH32_SUFFIX, VANITY_BECH32_BOTH
 
             // Encode public key to bech32
+            // Convert qx from little-endian to big-endian for Nostr
+            uint8_t pubkey_be[32];
             uint8_t *qxBytes = (uint8_t *)qx;
+            for (int i = 0; i < 32; i++) {
+                pubkey_be[i] = qxBytes[31 - i];
+            }
             char npub[64]; // 52 data + 6 checksum + null terminator
-            encode_npub(qxBytes, npub);
+            encode_npub(pubkey_be, npub);
 
             // Check pattern match
             if (vanityMode == 3) { // VANITY_BECH32_PREFIX
@@ -448,9 +464,11 @@ __global__ void CudaNostrVanityMine(
             }
 
             // Copy public key (x-only) to output
+            // NOTE: qx is stored as uint64_t[4] in little-endian format, but Nostr
+            // expects big-endian byte order, so we reverse the bytes
             uint8_t *qxBytes = (uint8_t *)qx;
             for (int i = 0; i < SIZE_PUBKEY_NOSTR; i++) {
-                outputPubKeysGPU[(idxThread * SIZE_PUBKEY_NOSTR) + i] = qxBytes[i];
+                outputPubKeysGPU[(idxThread * SIZE_PUBKEY_NOSTR) + i] = qxBytes[31 - i];
             }
 
             // Break after first match to save time
@@ -755,13 +773,19 @@ bool GPURummage::checkAndPrintResults() {
 
             printf("\n========== MATCH FOUND ==========\n");
             printf("Private Key (hex): ");
-            for (int i = 0; i < SIZE_PRIV_KEY_NOSTR; i++) {
+            // Reverse bytes for display (big-endian format expected by Nostr apps)
+            for (int i = SIZE_PRIV_KEY_NOSTR - 1; i >= 0; i--) {
                 printf("%02x", privKey[i]);
             }
             printf("\n");
 
+            // Reverse private key for nsec encoding
+            uint8_t privKey_reversed[32];
+            for (int i = 0; i < 32; i++) {
+                privKey_reversed[i] = privKey[31 - i];
+            }
             char nsec[100];
-            encode_nsec_cpu(privKey, nsec);
+            encode_nsec_cpu(privKey_reversed, nsec);
             printf("Private Key (nsec): %s\n", nsec);
 
             printf("Public Key (hex):  ");
@@ -782,7 +806,8 @@ bool GPURummage::checkAndPrintResults() {
             if (file != NULL) {
                 fprintf(file, "\n========== MATCH FOUND ==========\n");
                 fprintf(file, "Private Key (hex): ");
-                for (int i = 0; i < SIZE_PRIV_KEY_NOSTR; i++) {
+                // Reverse bytes for display (big-endian format expected by Nostr apps)
+                for (int i = SIZE_PRIV_KEY_NOSTR - 1; i >= 0; i--) {
                     fprintf(file, "%02x", privKey[i]);
                 }
                 fprintf(file, "\n");
