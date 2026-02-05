@@ -18,7 +18,9 @@
 #include "Int.h"
 #include <string.h>
 #include <math.h>
+#if !defined(__aarch64__) && !defined(__arm64__) && !defined(_M_ARM64)
 #include <emmintrin.h>
+#endif
 
 #define MAX(x,y) (((x)>(y))?(x):(y))
 #define MIN(x,y) (((x)<(y))?(x):(y))

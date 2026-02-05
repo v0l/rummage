@@ -16,7 +16,15 @@
 */
 
 #include "Int.h"
-#include <emmintrin.h>
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+  #include <arm_neon.h>
+  typedef int64x2_t __m128i;
+  #define _mm_slli_epi64(a, count) vshlq_n_s64(a, count)
+  #define _mm_add_epi64(a, b) vaddq_s64(a, b)
+  #define _mm_sub_epi64(a, b) vsubq_s64(a, b)
+#else
+  #include <emmintrin.h>
+#endif
 #include <string.h>
 
 #define MAX(x,y) (((x)>(y))?(x):(y))
@@ -234,6 +242,9 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
   _u.m128i_u64[1] = 0;
   _v.m128i_u64[0] = 0;
   _v.m128i_u64[1] = 1;
+#elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+  _u = vsetq_lane_s64(1, vdupq_n_s64(0), 0);
+  _v = vsetq_lane_s64(1, vdupq_n_s64(0), 1);
 #else
   ((int64_t *)&_u)[0] = 1;
   ((int64_t *)&_u)[1] = 0;
@@ -271,6 +282,11 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
   *uv = _u.m128i_u64[1];
   *vu = _v.m128i_u64[0];
   *vv = _v.m128i_u64[1];
+#elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+  *uu = vgetq_lane_s64(_u, 0);
+  *uv = vgetq_lane_s64(_u, 1);
+  *vu = vgetq_lane_s64(_v, 0);
+  *vv = vgetq_lane_s64(_v, 1);
 #else
   *uu = ((int64_t *)&_u)[0];
   *uv = ((int64_t *)&_u)[1];

@@ -215,6 +215,57 @@ private:
 
 #ifndef WIN64
 
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+
+// ===== ARM64 IMPLEMENTATIONS =====
+
+static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
+  unsigned __int128 res = (unsigned __int128)a * (unsigned __int128)b;
+  *h = (uint64_t)(res >> 64);
+  return (uint64_t)res;
+}
+
+static int64_t inline _mul128(int64_t a, int64_t b, int64_t *h) {
+  __int128 res = (__int128)a * (__int128)b;
+  *h = (int64_t)(res >> 64);
+  return (int64_t)res;
+}
+
+static uint64_t inline _udiv128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *r) {
+  unsigned __int128 dividend = ((unsigned __int128)hi << 64) | lo;
+  *r = (uint64_t)(dividend % d);
+  return (uint64_t)(dividend / d);
+}
+
+static uint64_t inline __rdtsc() {
+  uint64_t val;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
+  return val;
+}
+
+#define __shiftright128(a,b,n) ((a)>>(n))|((b)<<(64-(n)))
+#define __shiftleft128(a,b,n) ((b)<<(n))|((a)>>(64-(n)))
+
+static inline unsigned char _addcarry_u64(unsigned char c_in, uint64_t a, uint64_t b, uint64_t *out) {
+  unsigned __int128 sum = (unsigned __int128)a + (unsigned __int128)b + (unsigned __int128)c_in;
+  *out = (uint64_t)sum;
+  return (unsigned char)(sum >> 64);
+}
+
+static inline unsigned char _subborrow_u64(unsigned char b_in, uint64_t a, uint64_t b, uint64_t *out) {
+  unsigned __int128 diff = (unsigned __int128)a - (unsigned __int128)b - (unsigned __int128)b_in;
+  *out = (uint64_t)diff;
+  return (unsigned char)((diff >> 64) & 1);
+}
+
+#define _byteswap_uint64 __builtin_bswap64
+#define LZC(x) __builtin_clzll(x)
+#define TZC(x) __builtin_ctzll(x)
+
+#else
+
+// ===== X86-64 IMPLEMENTATIONS =====
+
 // Missing intrinsics
 static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
   uint64_t rhi;
@@ -256,6 +307,8 @@ static uint64_t inline __rdtsc() {
 #define _byteswap_uint64 __builtin_bswap64
 #define LZC(x) __builtin_clzll(x)
 #define TZC(x) __builtin_ctzll(x)
+
+#endif  // ARM64 vs x86-64
 
 #else
 
