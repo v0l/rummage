@@ -32,11 +32,18 @@
 #include <curand_kernel.h>
 
 //CUDA-specific parameters that determine occupancy and thread-count
-//Adjust according to your GPU specs
+//These are defaults - override via Makefile CXXFLAGS for your GPU
 // RTX 3060: 28 SMs, optimize for high occupancy
-#define NOSTR_BLOCKS_PER_GRID 512    // Balanced for memory and performance
+// For RTX PRO 6000 Blackwell: 188 SMs
+#ifdef NOSTR_BLOCKS_PER_GRID
+#else
+#define NOSTR_BLOCKS_PER_GRID 3072   // 188 SMs × 16x = 3008, round to 3072
+#endif
 #define NOSTR_THREADS_PER_BLOCK 256  // Keep at 256 (optimal for most kernels)
-#define KEYS_PER_THREAD_BATCH 64     // Each thread generates multiple keys per iteration
+#ifdef KEYS_PER_THREAD_BATCH
+#else
+#define KEYS_PER_THREAD_BATCH 256    // Each thread generates multiple keys per iteration
+#endif
 
 #define NOSTR_COUNT_CUDA_THREADS (NOSTR_BLOCKS_PER_GRID * NOSTR_THREADS_PER_BLOCK)
 #define NOSTR_IDX_CUDA_THREAD ((blockIdx.x * blockDim.x) + threadIdx.x)
