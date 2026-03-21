@@ -76,6 +76,7 @@ void printUsage(const char *progName) {
     printf("\nSearch Mode Options:\n");
     printf("  --sequential            Use sequential exhaustive search\n");
     printf("  --checkpoint <file>     Checkpoint file for sequential mode (default: checkpoint.txt)\n");
+    printf("  --once                  Exit as soon as a matching key is found\n");
     printf("\n  --help                  Show this help message\n");
     printf("\nExamples:\n");
     printf("  %s --prefix cafe\n", progName);
@@ -168,6 +169,7 @@ int main(int argc, char **argv) {
     bool isBech32Mode = false;
     SearchMode searchMode = SEARCH_RANDOM;  // Default to random search
     const char *checkpointFile = "checkpoint.txt";
+    bool exitOnceFound = false;
 
     if (argc < 3) {
         printUsage(argv[0]);
@@ -241,6 +243,8 @@ int main(int argc, char **argv) {
                 printf("Error: --checkpoint requires a filename\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--once") == 0) {
+            exitOnceFound = true;
         }
     }
 
@@ -522,10 +526,12 @@ int main(int argc, char **argv) {
         // If we found a match and want to stop, break
         // (For continuous mining, remove this break)
         if (found) {
+            if (exitOnceFound) {
+                break;
+            }
             printf("\nMatch found! Continuing to search for more matches...\n");
             printf("(Press Ctrl+C to stop mining)\n\n");
             fflush(stdout);  // Force output to file immediately
-            // break; // Uncomment to stop after first match
         }
 
         iteration++;
