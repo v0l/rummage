@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use rand::RngCore;
+use nostr_sdk::prelude::*;
+use ::rand::RngCore;
 use rummage_rs::{GTable, PowMiner, SearchMode, VanityMiner, VanityMode};
 use sha2::{Digest, Sha256};
 
@@ -90,6 +91,18 @@ struct PowArgs {
     /// Target difficulty in leading zero bits
     #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=64))]
     difficulty: u32,
+
+    /// Secret key (nsec or hex) to sign and optionally publish the event
+    #[arg(long)]
+    nsec: Option<String>,
+
+    /// Relay URL(s) to publish the signed event to (requires --nsec)
+    #[arg(long)]
+    relay: Vec<String>,
+
+    /// Append nonce to content instead of nonce tag for faster hashing
+    #[arg(long)]
+    fast: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,11 +219,125 @@ fn build_pow_template(
     (prefix, suffix)
 }
 
+/// Build template for fast mode: nonce varies inside content, nonce tag is fixed to "0".
+/// Serialization: [0,"<pk>",<ts>,<kind>,[...["nonce","0","<diff>"]],\"<content> <NONCE>"]
+/// The nonce digits appear right before the closing "], giving a minimal suffix.
+fn build_pow_template_fast(
+    pubkey: &str,
+    created_at: u32,
+    kind: i64,
+    existing_tags: &Option<String>,
+    content: &str,
+    difficulty: u32,
+) -> (String, String) {
+    let mut prefix = format!("[0,\"{}\",{},{},[", pubkey, created_at, kind);
+    if let Some(tags) = existing_tags {
+        prefix.push_str(tags);
+        prefix.push(',');
+    }
+    // Fixed nonce tag with value "0", then content with trailing space before nonce digits
+    prefix.push_str(&format!(
+        "[\"nonce\",\"0\",\"{}\"]],\"{} ",
+        difficulty, content
+    ));
+
+    let suffix = "\"]".to_string();
+    (prefix, suffix)
+}
+
 fn unix_now() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as u32
+}
+
+// ---------------------------------------------------------------------------
+// Nostr event building / publishing
+// ---------------------------------------------------------------------------
+
+fn build_and_sign_event(
+    keys: &Keys,
+    created_at: u32,
+    kind: i64,
+    content: &str,
+    event_json: &serde_json::Value,
+    nonce: u64,
+    difficulty: u32,
+    fast_mode: bool,
+) -> anyhow::Result<Event> {
+    // Rebuild tags: existing tags from the input + the nonce tag
+    let mut tags: Vec<Tag> = Vec::new();
+
+    if let Some(arr) = event_json["tags"].as_array() {
+        for tag_val in arr {
+            if let Some(tag_arr) = tag_val.as_array() {
+                let parts: Vec<String> = tag_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                if !parts.is_empty() {
+                    tags.push(Tag::custom(
+                        TagKind::from(parts[0].as_str()),
+                        parts[1..].to_vec(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // In fast mode: nonce tag value is "0", nonce is appended to content
+    // In standard mode: nonce tag value is the actual nonce
+    let nonce_tag_value = if fast_mode {
+        "0".to_string()
+    } else {
+        nonce.to_string()
+    };
+
+    tags.push(Tag::custom(
+        TagKind::from("nonce"),
+        vec![nonce_tag_value, difficulty.to_string()],
+    ));
+
+    // In fast mode, the content has the nonce appended
+    let final_content = if fast_mode {
+        format!("{} {}", content, nonce)
+    } else {
+        content.to_string()
+    };
+
+    let builder = EventBuilder::new(Kind::from(kind as u16), &final_content)
+        .tags(tags)
+        .custom_created_at(Timestamp::from(created_at as u64));
+
+    let signed = builder.sign_with_keys(keys)?;
+    Ok(signed)
+}
+
+#[tokio::main]
+async fn publish_event_async(event: Event, relay_urls: Vec<String>) -> anyhow::Result<()> {
+    let client = Client::default();
+    for url in &relay_urls {
+        client.add_relay(url.as_str()).await?;
+    }
+    client.connect().await;
+
+    let output = client.send_event(&event).await?;
+    println!("Event ID: {}", output.id().to_bech32()?);
+
+    for url in output.success.iter() {
+        println!("  {}: ok", url);
+    }
+    for (url, err) in output.failed.iter() {
+        println!("  {}: failed ({})", url, err);
+    }
+
+    client.disconnect().await;
+    Ok(())
+}
+
+fn publish_event(event: Event, relay_urls: Vec<String>) -> anyhow::Result<()> {
+    publish_event_async(event, relay_urls)
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +351,16 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
         r.store(false, Ordering::SeqCst);
     })?;
 
+    // Parse signing key if provided
+    let keys = match &args.nsec {
+        Some(nsec) => Some(Keys::parse(nsec)?),
+        None => None,
+    };
+
+    if !args.relay.is_empty() && keys.is_none() {
+        anyhow::bail!("--relay requires --nsec to sign the event before publishing");
+    }
+
     // Load event JSON
     let event_json = match (&args.event, &args.file) {
         (Some(json), _) => json.clone(),
@@ -233,9 +370,18 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
 
     let event: serde_json::Value = serde_json::from_str(&event_json)?;
 
-    let pubkey = event["pubkey"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing pubkey"))?;
+    // If --nsec is provided, derive pubkey from it; otherwise require it in the event JSON
+    let pubkey = if let Some(ref k) = keys {
+        k.public_key().to_hex()
+    } else {
+        event["pubkey"]
+            .as_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing pubkey (provide --nsec or include pubkey in event JSON)")
+            })?
+            .to_string()
+    };
+
     let mut created_at = event["created_at"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("missing created_at"))? as u32;
@@ -249,21 +395,26 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
     let existing_tags = extract_tags_inner(&event_json);
 
     let difficulty = args.difficulty;
+    let fast_mode = args.fast;
 
-    let (mut prefix, suffix) = build_pow_template(
-        pubkey,
-        created_at,
-        kind,
-        &existing_tags,
-        content,
-        difficulty,
-    );
+    let build_template = |pubkey: &str, created_at: u32| -> (String, String) {
+        if fast_mode {
+            build_pow_template_fast(pubkey, created_at, kind, &existing_tags, content, difficulty)
+        } else {
+            build_pow_template(pubkey, created_at, kind, &existing_tags, content, difficulty)
+        }
+    };
+
+    let (mut prefix, suffix) = build_template(&pubkey, created_at);
 
     println!("\nPoW Mining Configuration:");
     println!("  Pubkey:     {}", pubkey);
     println!("  Created at: {}", created_at);
     println!("  Kind:       {}", kind);
     println!("  Difficulty: {} leading zero bits", difficulty);
+    if fast_mode {
+        println!("  Mode:       fast (nonce appended to content)");
+    }
     println!(
         "  Template:   {} prefix + nonce + {} suffix bytes",
         prefix.len(),
@@ -333,9 +484,39 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
                 }
             );
 
-            println!("\nAdd this to your event:");
-            println!("  \"created_at\": {}", created_at);
-            println!("  [\"nonce\",\"{}\",\"{}\"]", result.nonce, difficulty);
+            // Sign and optionally publish with nostr-sdk
+            if let Some(ref keys) = keys {
+                let signed_event = build_and_sign_event(
+                    keys,
+                    created_at,
+                    kind,
+                    content,
+                    &event,
+                    result.nonce,
+                    difficulty,
+                    fast_mode,
+                )?;
+
+                println!("\nSigned event JSON:");
+                println!("{}", signed_event.as_json());
+
+                if !args.relay.is_empty() {
+                    println!("\nPublishing to {} relay(s)...", args.relay.len());
+                    let relay_urls = args.relay.clone();
+                    publish_event(signed_event, relay_urls)?;
+                    println!("Published!");
+                }
+            } else {
+                println!("\nAdd this to your event:");
+                println!("  \"created_at\": {}", created_at);
+                if fast_mode {
+                    println!("  \"content\": \"{} {}\"", content, result.nonce);
+                    println!("  [\"nonce\",\"0\",\"{}\"]", difficulty);
+                } else {
+                    println!("  [\"nonce\",\"{}\",\"{}\"]", result.nonce, difficulty);
+                }
+            }
+
             println!("================================");
             return Ok(());
         }
@@ -351,14 +532,7 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
                 created_at = new_ts;
                 miner.cleanup();
 
-                let (new_prefix, _new_suffix) = build_pow_template(
-                    pubkey,
-                    created_at,
-                    kind,
-                    &existing_tags,
-                    content,
-                    difficulty,
-                );
+                let (new_prefix, _new_suffix) = build_template(&pubkey, created_at);
                 prefix = new_prefix;
                 // suffix never changes (doesn't contain created_at)
 
@@ -522,7 +696,7 @@ fn run_vanity(args: VanityArgs) -> anyhow::Result<()> {
             resuming_from_checkpoint = true;
             println!("Loaded starting offset from checkpoint file");
         } else {
-            rand::rng().fill_bytes(&mut start_offset);
+            ::rand::rng().fill_bytes(&mut start_offset);
             resuming_from_checkpoint = true; // will be false, but set below
             println!("Generated random 256-bit starting offset for sequential search");
         }
@@ -664,6 +838,9 @@ fn run_vanity(args: VanityArgs) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider for TLS (needed by nostr-sdk relay connections)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     print!("{}", BANNER);
 
     let cli = Cli::parse();

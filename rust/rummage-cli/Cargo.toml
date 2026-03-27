@@ -21,3 +21,6 @@ hex = "0.4"
 rand = "0.9"
 ctrlc = "3"
 anyhow = "1"
+nostr-sdk = "0.44"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+rustls = "0.23"
