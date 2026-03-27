@@ -62,6 +62,23 @@ Mine PoW from an inline JSON string:
 
 The event JSON must contain `pubkey`, `created_at`, `kind`, `content`, and optionally `tags`. On success, Rummage prints the nonce tag to add to your event.
 
+#### How content length affects PoW hashrate
+
+The GPU computes SHA-256 over the [NIP-01 canonical event serialization](https://github.com/nostr-protocol/nips/blob/master/01.md), which includes the `content` field verbatim. The host pre-computes a SHA-256 midstate over the fixed prefix (everything before the nonce), so the GPU only processes the **tail**: the prefix remainder + nonce digits + suffix (which contains the content). Longer content means more SHA-256 block transforms per nonce attempt, which directly reduces hashrate.
+
+Each SHA-256 block is 64 bytes. The number of GPU transforms per nonce is `ceil((tailLen + 9) / 64)`, where the `+9` accounts for SHA-256 padding. Performance scales roughly as `1 / transforms` — doubling the transform count approximately halves the hashrate.
+
+The table below shows approximate content length thresholds for a typical kind-1 event with no extra tags and a 2-digit difficulty target. These thresholds shift by a few bytes depending on nonce length (which grows as mining progresses), number of existing tags, kind digits, and difficulty digits.
+
+| Content length | GPU transforms / nonce | Relative hashrate |
+|---|---|---|
+| 0–3 chars | 1 | **1.0x** (baseline) |
+| 4–67 chars | 2 | ~0.5x |
+| 68–131 chars | 3 | ~0.33x |
+| 132–195 chars | 4 | ~0.25x |
+
+> **Tip:** For maximum PoW mining speed, keep your content short. A "gm" post mines roughly 2x faster than a 100-character message.
+
 ## Options
 
 **Bech32 Mode** (searches npub address):
@@ -106,7 +123,7 @@ Rummage also provides Rust bindings as a workspace of three crates under `rust/`
 cargo build --release --manifest-path rust/Cargo.toml
 ```
 
-This requires the same prerequisites as the C++ build (CUDA Toolkit, GMP, g++). The CUDA compute capability defaults to 120 (Blackwell) and can be overridden with the `CUDA_CCAP` environment variable:
+This requires the same prerequisites as the C++ build (CUDA Toolkit, GMP, g++). The build script auto-detects CUDA compute capability from the installed GPU via `nvidia-smi`, falling back to the highest architecture supported by `nvcc`. To override, set `CUDA_CCAP`:
 
 ```bash
 CUDA_CCAP=89 cargo build --release --manifest-path rust/Cargo.toml

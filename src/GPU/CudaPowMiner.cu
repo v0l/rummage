@@ -47,13 +47,12 @@ inline void __powCudaSafeCall(cudaError err, const char *file, const int line) {
 #define POW_THREADS_PER_BLOCK 256
 #define NONCES_PER_THREAD     128   // Each thread tries this many nonces per launch
 
-// Max bytes for the tail (prefix remainder + nonce decimal + suffix).
-// Typical event: ~30 prefix remainder + 20 nonce digits + 25 suffix = 75 bytes.
-#define MAX_TAIL_BYTES 192
-
 // Max constant-memory sizes for prefix remainder and suffix
 #define MAX_PREFIX_REM 64
 #define MAX_SUFFIX_LEN 256
+
+// Max tail = prefix remainder + max nonce digits (20) + suffix
+#define MAX_TAIL_BYTES (MAX_PREFIX_REM + 20 + MAX_SUFFIX_LEN)
 
 // Number of CUDA streams for async dispatch
 #define NUM_STREAMS 2
@@ -244,7 +243,7 @@ PowMineKernel(
     // Pre-build the blocks buffer with constant bytes (prefix rem + suffix).
     // Layout: [prefixRem (constant) | nonce digits (variable) | suffix (constant)]
     // We rebuild only when nonceLen changes (at most once per 128 nonces).
-    uint8_t blocks[256]; // enough for 4 x 64-byte SHA256 blocks
+    uint8_t blocks[MAX_TAIL_BYTES];
     int prevNonceLen = -1; // force initial build
 
     for (int n = 0; n < NONCES_PER_THREAD; n++) {
@@ -495,16 +494,6 @@ bool CudaPowMiner::init(const std::string &prefix, const std::string &suffix, in
         return false;
     }
 
-    // Verify tail fits in buffer
-    // Max tail = prefixRemLen + 20 (max nonce digits) + suffixLen
-    int maxTail = prefixRemLen + 20 + ctx->suffixLen;
-    if (maxTail > MAX_TAIL_BYTES) {
-        fprintf(stderr, "Error: Tail too large (%d bytes, max %d). Increase MAX_TAIL_BYTES.\n",
-                maxTail, MAX_TAIL_BYTES);
-        delete ctx; ctx = nullptr;
-        return false;
-    }
-
     // Upload constants to GPU
     PowCudaSafe(cudaMemcpyToSymbol(d_midstate, midstate, sizeof(midstate)));
     PowCudaSafe(cudaMemcpyToSymbol(d_prefixRem, prefix.data() + consumed, prefixRemLen));
@@ -533,7 +522,7 @@ bool CudaPowMiner::init(const std::string &prefix, const std::string &suffix, in
     printf("PoW Miner: midstate consumed %d/%d prefix bytes, %d remainder\n",
            consumed, ctx->prefixTotalLen, prefixRemLen);
     printf("PoW Miner: max tail = %d bytes (prefixRem:%d + nonce:20 + suffix:%d)\n",
-           maxTail, prefixRemLen, ctx->suffixLen);
+           prefixRemLen + 20 + ctx->suffixLen, prefixRemLen, ctx->suffixLen);
 
     // Allocate per-stream device buffers and create streams
     for (int s = 0; s < NUM_STREAMS; s++) {

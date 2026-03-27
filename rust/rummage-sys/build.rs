@@ -29,7 +29,51 @@ fn main() {
     let cuda_lib = format!("{}/lib64", cuda_path);
 
     // --- Detect compute capability ---
-    let ccap = env::var("CUDA_CCAP").unwrap_or_else(|_| "120".to_string());
+    // Priority: CUDA_CCAP env var > nvidia-smi query > highest supported by nvcc
+    let ccap = env::var("CUDA_CCAP").ok().unwrap_or_else(|| {
+        // Try detecting the installed GPU's compute capability
+        if let Ok(output) = Command::new("nvidia-smi")
+            .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // nvidia-smi returns "X.Y\n" — strip the dot to get "XY"
+                if let Some(line) = stdout.lines().next() {
+                    let cap = line.trim().replace('.', "");
+                    if !cap.is_empty() && cap.chars().all(|c| c.is_ascii_digit()) {
+                        println!("cargo:warning=Detected GPU compute capability: sm_{}", cap);
+                        return cap;
+                    }
+                }
+            }
+        }
+
+        // Fall back to highest architecture supported by nvcc
+        if let Ok(output) = Command::new(&nvcc).arg("--list-gpu-arch").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Lines look like "compute_120" — parse the numeric suffix and pick the max
+                if let Some(max) = stdout
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix("compute_"))
+                    .filter_map(|s| s.parse::<u32>().ok())
+                    .max()
+                {
+                    println!(
+                        "cargo:warning=No GPU detected, using highest nvcc-supported arch: sm_{}",
+                        max
+                    );
+                    return max.to_string();
+                }
+            }
+        }
+
+        panic!(
+            "Could not detect GPU compute capability. \
+             Set CUDA_CCAP environment variable (e.g. CUDA_CCAP=89 for RTX 4090)."
+        );
+    });
 
     // --- GPU tuning defines ---
     let blocks_per_grid = env::var("NOSTR_BLOCKS_PER_GRID").unwrap_or_else(|_| "3072".to_string());
