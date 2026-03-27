@@ -1,3 +1,4 @@
+use std::ffi::c_char;
 use std::fmt;
 
 use rummage_sys::{
@@ -62,9 +63,9 @@ impl PowMiner {
         let ok = unsafe {
             rummage_pow_init(
                 self.handle,
-                prefix.as_ptr() as *const i8,
+                prefix.as_ptr() as *const c_char,
                 prefix.len(),
-                suffix.as_ptr() as *const i8,
+                suffix.as_ptr() as *const c_char,
                 suffix.len(),
                 target_difficulty,
             )

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Safe Rust wrappers for the Rummage GPU Nostr mining library (CUDA)"
+readme = "README.md"
 
 [dependencies]
-rummage-sys = { path = "../rummage-sys", version = "0.1.0" }
+rummage-sys = { path = "../rummage-sys", version = "0.1.1" }

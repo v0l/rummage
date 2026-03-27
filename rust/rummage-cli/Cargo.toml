@@ -5,13 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "GPU-accelerated Nostr mining tool (vanity keys + NIP-13 PoW)"
+readme = "README.md"
 
 [[bin]]
 name = "rummage"
 path = "src/main.rs"
 
 [dependencies]
-rummage-rs = { path = "../rummage-rs", version = "0.1.0" }
+rummage-rs = { path = "../rummage-rs", version = "0.1.1" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
