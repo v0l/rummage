@@ -28,9 +28,17 @@
 #include <cassert>
 #include <chrono>
 #include <signal.h>
+#include <sstream>
+#include <fstream>
 #include "GPU/GPURummage.h"
+#include "GPU/CudaPowMiner.h"
 #include "GPU/NostrUtils.h"
 #include "CPU/SECP256k1.h"
+
+// SHA256 implementation for event ID computation
+extern "C" {
+    #include <openssl/sha.h>
+}
 
 // Global flag for graceful shutdown
 volatile sig_atomic_t keepRunning = 1;
@@ -38,6 +46,94 @@ volatile sig_atomic_t keepRunning = 1;
 void signalHandler(int sig) {
     printf("\nReceived signal %d, stopping mining...\n", sig);
     keepRunning = 0;
+}
+
+// Convert byte array to hex string
+std::string bytesToHex(const uint8_t *bytes, size_t len) {
+    static const char hexChars[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(len * 2);
+    for (size_t i = 0; i < len; i++) {
+        result += hexChars[(bytes[i] >> 4) & 0xF];
+        result += hexChars[bytes[i] & 0xF];
+    }
+    return result;
+}
+
+// Compute SHA256 hash
+std::string sha256(const uint8_t *data, size_t len) {
+    uint8_t hash[SHA256_DIGEST_LENGTH];
+    SHA256(data, len, hash);
+    return bytesToHex(hash, SHA256_DIGEST_LENGTH);
+}
+
+// Count leading zero bits in a hash (from NIP-13 spec)
+int countLeadingZeroBits(const uint8_t *hash, size_t len) {
+    int total = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t b = hash[i];
+        int n = 0;
+        if (b == 0) {
+            total += 8;
+            continue;
+        }
+        while (b >>= 1) {
+            n++;
+        }
+        total += (7 - n);
+        break;
+    }
+    return total;
+}
+
+// Extract field value from simple JSON (basic parser)
+std::string extractJsonField(const std::string &json, const std::string &field) {
+    std::string searchKey = "\"" + field + "\"";
+    size_t pos = json.find(searchKey);
+    if (pos == std::string::npos) return "";
+    
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return "";
+    
+    pos = json.find_first_not_of(" \t\n\r", pos + 1);
+    if (pos == std::string::npos) return "";
+    
+    if (json[pos] == '"') {
+        size_t start = pos + 1;
+        size_t end = json.find('"', start);
+        if (end == std::string::npos) return "";
+        return json.substr(start, end - start);
+    }
+    
+    // For numeric values
+    size_t start = pos;
+    size_t end = json.find_first_of(",}", pos);
+    if (end == std::string::npos) return "";
+    
+    std::string value = json.substr(start, end - start);
+    value.erase(0, value.find_first_not_of(" \t\n\r"));
+    return value;
+}
+
+// Build event ID string for hashing (NIP-01 format)
+std::string buildEventIdString(const std::string &pubkey, uint32_t createdAt, 
+                                int kind, const std::string &tags, 
+                                const std::string &content) {
+    std::ostringstream oss;
+    oss << "[0,\"" << pubkey << "\"," << createdAt << "," << kind 
+        << "," << tags << ",\"" << content << "\"]";
+    return oss.str();
+}
+
+// Load unsigned event from file
+std::string loadEventFromFile(const char *filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        return "";
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
 }
 
 void loadGTable(uint8_t *gTableX, uint8_t *gTableY) {
@@ -77,11 +173,16 @@ void printUsage(const char *progName) {
     printf("  --sequential            Use sequential exhaustive search\n");
     printf("  --checkpoint <file>     Checkpoint file for sequential mode (default: checkpoint.txt)\n");
     printf("  --once                  Exit as soon as a matching key is found\n");
+    printf("\nPoW Mining (NIP-13):\n");
+    printf("  --pow-event <json>      Mine PoW for an unsigned Nostr event (JSON string)\n");
+    printf("  --pow-file <file>       Mine PoW for an unsigned Nostr event (from file)\n");
+    printf("  --pow-difficulty <n>    Target difficulty in leading zero bits (default: 20)\n");
     printf("\n  --help                  Show this help message\n");
     printf("\nExamples:\n");
     printf("  %s --prefix cafe\n", progName);
     printf("  %s --npub-prefix alice\n", progName);
     printf("  %s --npub-prefix satoshi --sequential\n", progName);
+    printf("  %s --pow-file event.json --pow-difficulty 24\n", progName);
 }
 
 // Validate hex string
@@ -159,7 +260,7 @@ int main(int argc, char **argv) {
     printf("        ╔═══════╗\n");
     printf("        ║       ║\n");
     printf("        ║ ╰───╯ ║   R U M M A G E\n");
-    printf("        ║       ║   npub mining tool\n");
+    printf("        ║       ║   nostr mining tool\n");
     printf("        ╚═══════╝\n");
     printf("\n");
 
@@ -171,7 +272,13 @@ int main(int argc, char **argv) {
     const char *checkpointFile = "checkpoint.txt";
     bool exitOnceFound = false;
 
-    if (argc < 3) {
+    // PoW mining arguments
+    const char *powEventJson = NULL;
+    const char *powEventFile = NULL;
+    int powDifficulty = 20;
+    bool powMode = false;
+
+    if (argc < 2) {
         printUsage(argv[0]);
         return 1;
     }
@@ -245,9 +352,248 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--once") == 0) {
             exitOnceFound = true;
+        } else if (strcmp(argv[i], "--pow-event") == 0) {
+            if (i + 1 < argc) {
+                powEventJson = argv[++i];
+                powMode = true;
+            } else {
+                printf("Error: --pow-event requires a JSON string\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--pow-file") == 0) {
+            if (i + 1 < argc) {
+                powEventFile = argv[++i];
+                powMode = true;
+            } else {
+                printf("Error: --pow-file requires a filename\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--pow-difficulty") == 0) {
+            if (i + 1 < argc) {
+                powDifficulty = atoi(argv[++i]);
+                if (powDifficulty < 1 || powDifficulty > 64) {
+                    printf("Error: --pow-difficulty must be between 1 and 64\n");
+                    return 1;
+                }
+            } else {
+                printf("Error: --pow-difficulty requires a number\n");
+                return 1;
+            }
         }
     }
 
+    // ======================================================================
+    // PoW Mining Mode (NIP-13)
+    // ======================================================================
+    if (powMode) {
+        signal(SIGINT, signalHandler);
+        signal(SIGTERM, signalHandler);
+
+        // Load event JSON
+        std::string eventJson;
+        if (powEventFile) {
+            eventJson = loadEventFromFile(powEventFile);
+            if (eventJson.empty()) {
+                fprintf(stderr, "Error: Cannot read event file '%s'\n", powEventFile);
+                return 1;
+            }
+        } else if (powEventJson) {
+            eventJson = powEventJson;
+        } else {
+            fprintf(stderr, "Error: Must specify --pow-event or --pow-file\n");
+            return 1;
+        }
+
+        // Parse event fields
+        std::string pubkey = extractJsonField(eventJson, "pubkey");
+        std::string createdAtStr = extractJsonField(eventJson, "created_at");
+        std::string kindStr = extractJsonField(eventJson, "kind");
+        std::string content = extractJsonField(eventJson, "content");
+
+        if (pubkey.empty() || createdAtStr.empty() || kindStr.empty()) {
+            fprintf(stderr, "Error: Event JSON must contain pubkey, created_at, and kind fields\n");
+            return 1;
+        }
+
+        uint32_t createdAt = (uint32_t)strtoul(createdAtStr.c_str(), NULL, 10);
+        int kind = atoi(kindStr.c_str());
+
+        // Extract existing tags array from the event JSON
+        std::string existingTags;
+        size_t tagsPos = eventJson.find("\"tags\"");
+        if (tagsPos != std::string::npos) {
+            size_t arrStart = eventJson.find('[', tagsPos + 5);
+            if (arrStart != std::string::npos) {
+                // Find matching closing bracket
+                int depth = 1;
+                size_t pos = arrStart + 1;
+                while (pos < eventJson.size() && depth > 0) {
+                    if (eventJson[pos] == '[') depth++;
+                    else if (eventJson[pos] == ']') depth--;
+                    pos++;
+                }
+                existingTags = eventJson.substr(arrStart + 1, pos - arrStart - 2);
+            }
+        }
+
+        // Build the NIP-01 serialization template with nonce tag placeholder
+        // Format: [0,"<pubkey>",<created_at>,<kind>,<tags>,"<content>"]
+        // The nonce tag: ["nonce","<NONCE>","<target>"]
+        //
+        // We split the template at the nonce value position:
+        //   prefix = [0,"<pubkey>",<ts>,<kind>,[...tags...,["nonce","
+        //   suffix = ","<target>"]...],"<content>"]
+
+        // Helper to build prefix/suffix for a given timestamp
+        auto buildTemplate = [&](uint32_t ts) -> std::pair<std::string, std::string> {
+            std::ostringstream pss, sss;
+            pss << "[0,\"" << pubkey << "\"," << ts << "," << kind << ",[";
+            if (!existingTags.empty()) {
+                pss << existingTags << ",";
+            }
+            pss << "[\"nonce\",\"";
+            sss << "\",\"" << powDifficulty << "\"]],\"" << content << "\"]";
+            return {pss.str(), sss.str()};
+        };
+
+        auto [prefix, suffix] = buildTemplate(createdAt);
+
+        printf("\nPoW Mining Configuration:\n");
+        printf("  Pubkey:     %s\n", pubkey.c_str());
+        printf("  Created at: %u\n", createdAt);
+        printf("  Kind:       %d\n", kind);
+        printf("  Difficulty: %d leading zero bits\n", powDifficulty);
+        printf("  Template:   %zu prefix + nonce + %zu suffix bytes\n",
+               prefix.size(), suffix.size());
+
+        // Verify with a CPU check first (nonce = 0)
+        std::string testMsg = prefix + "0" + suffix;
+        uint8_t testHash[SHA256_DIGEST_LENGTH];
+        SHA256((const uint8_t *)testMsg.c_str(), testMsg.size(), testHash);
+        printf("  Verify ID:  %s (nonce=0, %d bits)\n",
+               bytesToHex(testHash, SHA256_DIGEST_LENGTH).c_str(),
+               countLeadingZeroBits(testHash, SHA256_DIGEST_LENGTH));
+        printf("\n");
+
+        // Initialize GPU miner
+        CudaPowMiner miner;
+        if (!miner.init(prefix, suffix, powDifficulty)) {
+            fprintf(stderr, "Error: Failed to initialize GPU PoW miner\n");
+            return 1;
+        }
+
+        uint32_t batchSize = miner.getThreadCount();
+        int numStreams = miner.getStreamCount();
+        // Each thread tries NONCES_PER_THREAD nonces (defined in CudaPowMiner.cu)
+        // We define it here too for the host-side accounting
+        const int noncesPerThread = 128;
+        // Total nonces per mineBatch call = threads * nonces/thread * streams
+        uint64_t noncesPerBatch = (uint64_t)batchSize * noncesPerThread * numStreams;
+        uint64_t nonceStart = 0;
+        uint64_t totalAttempts = 0;
+        PowResult result;
+
+        // Timestamp refresh interval (seconds) — keeps created_at current
+        // during long mining sessions and gives a fresh nonce search space
+        const int timestampRefreshSecs = 30;
+        auto lastTimestampRefresh = std::chrono::system_clock::now();
+
+        auto startTime = std::chrono::system_clock::now();
+        auto lastReport = startTime;
+
+        printf("Mining started! Press Ctrl+C to stop.\n");
+        printf("  (created_at will refresh every %d seconds)\n\n", timestampRefreshSecs);
+
+        while (keepRunning) {
+            bool found = miner.mineBatch(nonceStart, batchSize, result);
+            totalAttempts += noncesPerBatch;
+            nonceStart += noncesPerBatch;
+
+            if (found) {
+                auto endTime = std::chrono::system_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+
+                printf("\n========== PoW FOUND ==========\n");
+                printf("Nonce:      %lu\n", result.nonce);
+                printf("Event ID:   %s\n", bytesToHex(result.eventId, 32).c_str());
+                printf("Difficulty: %d bits\n", result.difficulty);
+                printf("Timestamp:  %u\n", createdAt);
+                printf("Attempts:   %lu\n", totalAttempts);
+                printf("Time:       %.2f seconds\n", elapsed / 1000.0);
+                if (elapsed > 0) {
+                    printf("Rate:       %.2f MH/s\n", totalAttempts / (elapsed / 1000.0) / 1e6);
+                }
+
+                // Verify on CPU
+                char nonceBuf[21];
+                snprintf(nonceBuf, sizeof(nonceBuf), "%lu", result.nonce);
+                std::string fullMsg = prefix + nonceBuf + suffix;
+                uint8_t cpuHash[SHA256_DIGEST_LENGTH];
+                SHA256((const uint8_t *)fullMsg.c_str(), fullMsg.size(), cpuHash);
+                int cpuBits = countLeadingZeroBits(cpuHash, SHA256_DIGEST_LENGTH);
+
+                printf("CPU verify: %s (%d bits) %s\n",
+                       bytesToHex(cpuHash, SHA256_DIGEST_LENGTH).c_str(),
+                       cpuBits,
+                       (cpuBits >= powDifficulty) ? "OK" : "MISMATCH!");
+
+                // Print the nonce tag to add to the event
+                printf("\nAdd this to your event:\n");
+                printf("  \"created_at\": %u\n", createdAt);
+                printf("  [\"nonce\",\"%lu\",\"%d\"]\n", result.nonce, powDifficulty);
+                printf("================================\n");
+
+                miner.cleanup();
+                return 0;
+            }
+
+            // Check if we should refresh the timestamp
+            auto now = std::chrono::system_clock::now();
+            auto sinceTsRefresh = std::chrono::duration_cast<std::chrono::seconds>(
+                now - lastTimestampRefresh).count();
+            if (sinceTsRefresh >= timestampRefreshSecs) {
+                uint32_t newTs = (uint32_t)std::chrono::duration_cast<std::chrono::seconds>(
+                    now.time_since_epoch()).count();
+                if (newTs != createdAt) {
+                    createdAt = newTs;
+                    miner.cleanup();
+
+                    auto [newPrefix, newSuffix] = buildTemplate(createdAt);
+                    prefix = newPrefix;
+                    suffix = newSuffix;
+
+                    if (!miner.init(prefix, suffix, powDifficulty)) {
+                        fprintf(stderr, "Error: Failed to reinitialize GPU PoW miner\n");
+                        return 1;
+                    }
+                    // Reset nonce — fresh timestamp = fresh search space
+                    nonceStart = 0;
+                    printf("PoW: refreshed created_at to %u, reset nonce\n", createdAt);
+                    fflush(stdout);
+                }
+                lastTimestampRefresh = now;
+            }
+
+            // Progress report every 5 seconds
+            auto sinceReport = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count();
+            if (sinceReport > 5000) {
+                auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count();
+                double rate = (totalMs > 0) ? (totalAttempts / (totalMs / 1000.0)) : 0;
+                printf("PoW: %lu attempts, %.2f MH/s, nonce range [%lu..%lu)\n",
+                       totalAttempts, rate / 1e6, nonceStart - noncesPerBatch, nonceStart);
+                fflush(stdout);
+                lastReport = now;
+            }
+        }
+
+        printf("\nPoW mining stopped. No solution found after %lu attempts.\n", totalAttempts);
+        miner.cleanup();
+        return 0;
+    }
+
+    // ======================================================================
+    // Vanity Key Mining Mode (original functionality)
+    // ======================================================================
     if (vanityPattern == NULL) {
         printf("Error: You must specify a vanity pattern\n");
         printUsage(argv[0]);

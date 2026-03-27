@@ -4,11 +4,12 @@
 # Rummage
 </div>
 
-Rummage is a high-performance Nostr vanity address miner that searches the secp256k1 keyspace to generate custom prefixes or suffixes in either Bech32 npub format or raw hex. It supports both random sampling and exhaustive sequential search modes.
+Rummage is a high-performance Nostr mining tool built for NVIDIA GPUs using CUDA. It supports two modes:
 
-It's built for NVIDIA GPUs using CUDA and can sustain 42M+ keys/second on a consumer card (RTX 3070, Ampere architecture) and 170M+ keys/second on a datacenter card (H200, Hopper architecture).
+- **Vanity npub mining** — search the secp256k1 keyspace to generate custom prefixes or suffixes in either Bech32 npub format or raw hex, with both random sampling and exhaustive sequential search modes.
+- **Proof of Work (NIP-13)** — GPU-accelerated PoW mining for Nostr events, computing a nonce that produces an event ID with a target number of leading zero bits.
 
-There is also an experimental build for Apple Silicon in the Metal branch. This is a ground-up implementation in Metal Shading Language, as no existing secp256k1 libraries are available for Metal. Currently it can do about 9M+ keys/second on a 2021 M1.
+It can sustain 170M+ keys/second for vanity mining and 8,000+ MH/s for PoW on a datacenter GPU (RTX PRO 6000, Blackwell architecture).
 
 
 ## Requirements
@@ -28,6 +29,8 @@ If you need to configure for a different GPU or CUDA version, see [docs/BUILD.md
 
 ## Usage
 
+### Vanity npub mining
+
 Search for npub prefix:
 ```bash
 ./rummage --npub-prefix alice
@@ -44,6 +47,20 @@ Sequential exhaustive search (resumable):
 ```
 
 To learn more about how search modes work in Rummage, see [docs/SEARCH.md](docs/SEARCH.md).
+
+### Proof of Work (NIP-13)
+
+Mine PoW for a Nostr event from a JSON file:
+```bash
+./rummage --pow-file event.json --pow-difficulty 32
+```
+
+Mine PoW from an inline JSON string:
+```bash
+./rummage --pow-event '{"pubkey":"<hex>","created_at":1735000000,"kind":1,"tags":[],"content":"hello"}' --pow-difficulty 24
+```
+
+The event JSON must contain `pubkey`, `created_at`, `kind`, `content`, and optionally `tags`. On success, Rummage prints the nonce tag to add to your event.
 
 ## Options
 
@@ -62,6 +79,11 @@ To learn more about how search modes work in Rummage, see [docs/SEARCH.md](docs/
 - `--checkpoint <file>` - Checkpoint file path (default: checkpoint.txt)
 
 By default, random search mode is used (faster for short patterns).
+
+**PoW Mining (NIP-13)**:
+- `--pow-event <json>` - Mine PoW for an unsigned event (inline JSON)
+- `--pow-file <file>` - Mine PoW for an unsigned event (from file)
+- `--pow-difficulty <n>` - Target difficulty in leading zero bits (default: 20)
 
 
 ## Output

@@ -5,6 +5,9 @@ checkpoint.txt
 # Output files
 keys.txt
 
+# Event files
+event.json
+
 # Build artifacts
 rummage
 obj/

@@ -12,6 +12,7 @@ OBJDIR = obj
 
 OBJET = $(addprefix $(OBJDIR)/, \
 		GPU/GPURummage.o \
+		GPU/CudaPowMiner.o \
 		CPU/Point.o \
 		CPU/Int.o \
 		CPU/IntMod.o \
@@ -19,22 +20,22 @@ OBJET = $(addprefix $(OBJDIR)/, \
         rummage.o \
 )
 
-CCAP      = 86
-CUDA      = /usr/local/cuda
+CCAP      = 120
+CUDA      = /usr/local/cuda-13.2
 CXX       = g++
 CXXCUDA   = /usr/bin/g++
 
 # GPU Performance Configuration
 # Adjust these based on your GPU (see docs/PERFORMANCE.md)
-NOSTR_BLOCKS_PER_GRID   = 512
+NOSTR_BLOCKS_PER_GRID   = 3072
 NOSTR_THREADS_PER_BLOCK = 256
-KEYS_PER_THREAD_BATCH   = 64
+KEYS_PER_THREAD_BATCH   = 256
 
 CXXFLAGS  = -DWITHGPU -march=native -Wno-write-strings -O2 -I$(SRCDIR) -I$(CUDA)/include \
             -DNOSTR_BLOCKS_PER_GRID=$(NOSTR_BLOCKS_PER_GRID) \
             -DNOSTR_THREADS_PER_BLOCK=$(NOSTR_THREADS_PER_BLOCK) \
             -DKEYS_PER_THREAD_BATCH=$(KEYS_PER_THREAD_BATCH)
-LFLAGS    = -lgmp -lpthread -L$(CUDA)/lib64 -lcudart -lcurand
+LFLAGS    = -lgmp -lpthread -L$(CUDA)/lib64 -lcudart -lcurand -lssl -lcrypto
 NVCC      = $(CUDA)/bin/nvcc
 
 #--------------------------------------------------------------------
@@ -47,6 +48,10 @@ $(OBJDIR)/GPU/GPURummage.o: $(SRCDIR)/GPU/GPURummage.cu
 	-DNOSTR_THREADS_PER_BLOCK=$(NOSTR_THREADS_PER_BLOCK) \
 	-DKEYS_PER_THREAD_BATCH=$(KEYS_PER_THREAD_BATCH) \
 	-gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/GPURummage.o -c $(SRCDIR)/GPU/GPURummage.cu
+
+$(OBJDIR)/GPU/CudaPowMiner.o: $(SRCDIR)/GPU/CudaPowMiner.cu
+	$(NVCC) -allow-unsupported-compiler --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -O2 -I$(SRCDIR) -I$(CUDA)/include \
+	-gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/CudaPowMiner.o -c $(SRCDIR)/GPU/CudaPowMiner.cu
 
 $(OBJDIR)/%.o : $(SRCDIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -o $@ -c $<
