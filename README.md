@@ -9,7 +9,7 @@ Rummage is a high-performance Nostr mining tool built for NVIDIA GPUs using CUDA
 - **Vanity npub mining** — search the secp256k1 keyspace to generate custom prefixes or suffixes in either Bech32 npub format or raw hex, with both random sampling and exhaustive sequential search modes.
 - **Proof of Work (NIP-13)** — GPU-accelerated PoW mining for Nostr events, computing a nonce that produces an event ID with a target number of leading zero bits.
 
-It can sustain 170M+ keys/second for vanity mining and 8,000+ MH/s for PoW on a datacenter GPU (RTX PRO 6000, Blackwell architecture).
+It can sustain 170M+ keys/second for vanity mining and 15,000+ MH/s for PoW on a datacenter GPU (RTX PRO 6000, Blackwell architecture).
 
 
 ## Requirements
@@ -77,7 +77,7 @@ The table below shows approximate content length thresholds for a typical kind-1
 | 68–131 chars | 3 | ~0.33x |
 | 132–195 chars | 4 | ~0.25x |
 
-> **Tip:** For maximum PoW mining speed, keep your content short. A "gm" post mines roughly 2x faster than a 100-character message.
+> **Tip:** Use `--fast` mode to eliminate the content length penalty entirely. Without `--fast`, keep your content short — a "gm" post mines roughly 2x faster than a 100-character message.
 
 ## Options
 
@@ -101,6 +101,14 @@ By default, random search mode is used (faster for short patterns).
 - `--pow-event <json>` - Mine PoW for an unsigned event (inline JSON)
 - `--pow-file <file>` - Mine PoW for an unsigned event (from file)
 - `--pow-difficulty <n>` - Target difficulty in leading zero bits (default: 20)
+
+**PoW Mining (Rust CLI)**:
+- `pow --event <json>` - Mine PoW for an unsigned event (inline JSON)
+- `pow --file <file>` - Mine PoW for an unsigned event (from file)
+- `pow --difficulty <n>` - Target difficulty in leading zero bits (default: 20)
+- `pow --nsec <key>` - Secret key (nsec or hex) to sign the mined event
+- `pow --relay <url>` - Relay URL to publish to (repeatable, requires `--nsec`)
+- `pow --fast` - Append nonce to content for single-block GPU hashing
 
 
 ## Output
@@ -136,27 +144,90 @@ The Rust CLI uses subcommands instead of flat flags:
 **Vanity mining:**
 ```bash
 # Bech32 npub prefix
-./target/release/rummage-cli vanity --npub-prefix alice
+./target/release/rummage vanity --npub-prefix alice
 
 # Hex prefix
-./target/release/rummage-cli vanity --prefix cafe
+./target/release/rummage vanity --prefix cafe
 
 # Sequential exhaustive search (resumable)
-./target/release/rummage-cli vanity --npub-prefix satoshi --sequential
+./target/release/rummage vanity --npub-prefix satoshi --sequential
 ```
 
 **PoW mining (NIP-13):**
 ```bash
 # From a JSON file
-./target/release/rummage-cli pow --file event.json --difficulty 32
+./target/release/rummage pow --file event.json --difficulty 32
 
 # From an inline JSON string
-./target/release/rummage-cli pow --event '{"pubkey":"<hex>","created_at":1735000000,"kind":1,"tags":[],"content":"hello"}' --difficulty 24
+./target/release/rummage pow --event '{"pubkey":"<hex>","created_at":1735000000,"kind":1,"tags":[],"content":"hello"}' --difficulty 24
+
+# Sign and publish to relays
+./target/release/rummage pow --event '{"created_at":1735000000,"kind":1,"tags":[],"content":"gm"}' \
+  --difficulty 32 --nsec <hex-or-nsec> --relay wss://relay.example.com
+
+# Fast mode (max hashrate regardless of content length)
+./target/release/rummage pow --event '{"created_at":1735000000,"kind":1,"tags":[],"content":"hello world"}' \
+  --difficulty 40 --fast --nsec <hex-or-nsec> --relay wss://relay.example.com
 ```
+
+#### Fast mode
+
+By default, the GPU varies the nonce inside the `["nonce","<NONCE>","<diff>"]` tag. Because the `content` field comes after the nonce in the [NIP-01 serialization](https://github.com/nostr-protocol/nips/blob/master/01.md), the entire content must be re-hashed for every nonce attempt. Longer content means more SHA-256 block transforms per attempt, which directly reduces hashrate (see the table below).
+
+The `--fast` flag reverses this: it fixes the nonce tag to `["nonce","0","<diff>"]` and appends the varying nonce to the **end** of the content field (separated by a newline). Since content is the last field in the serialization, the nonce digits now appear right before the closing `"]`, giving a 2-byte suffix. The GPU only needs to hash one SHA-256 block regardless of content length — everything before the nonce is absorbed into the midstate.
+
+| Mode | Content length | Suffix bytes | GPU transforms | Hashrate (RTX PRO 6000) |
+|---|---|---|---|---|
+| Standard | 11 chars | ~40 | 1-2 | ~8,000 MH/s |
+| Standard | 213 chars | ~240 | 5 | ~3,900 MH/s |
+| **Fast** | 11 chars | 2 | 1 | **~13,500 MH/s** |
+| **Fast** | 213 chars | 2 | 1 | **~15,600 MH/s** |
+
+The resulting event content will look like `"hello world\n858074061"` — clients render the nonce on its own line below the note text.
+
+> **Note:** The mined event is fully valid NIP-13 — the nonce tag is present with the target difficulty, and the event ID has the required leading zero bits. Use `--nsec` to sign and optionally `--relay` to publish directly.
 
 ### Library Usage
 
 Add `rummage-rs` as a dependency to use the GPU miners from your own Rust code. See the [`rummage-rs` crate docs](rust/rummage-rs/src/lib.rs) for full API documentation and examples.
+
+#### Fast mode from library code
+
+`PowMiner` is a generic `SHA256(prefix + nonce_digits + suffix)` engine with no knowledge of Nostr semantics. Fast mode is purely about how you construct the prefix and suffix strings:
+
+```rust
+use rummage_rs::PowMiner;
+
+let pubkey = "79be667e...";
+let created_at = 1735000000u32;
+let content = "hello world";
+let difficulty = 32;
+
+// Standard mode: nonce varies inside the nonce tag, content is in the suffix
+let prefix = format!(
+    "[0,\"{}\",{},1,[[\"nonce\",\"", pubkey, created_at
+);
+let suffix = format!(
+    "\",\"{}\"]],\"{}\"]", difficulty, content
+);
+
+// Fast mode: nonce tag is fixed to "0", nonce varies at the end of content
+let prefix_fast = format!(
+    "[0,\"{}\",{},1,[[\"nonce\",\"0\",\"{}\"]],\"{}\\n",
+    pubkey, created_at, difficulty, content
+);
+let suffix_fast = "\"]".to_string();
+
+// Both use the same PowMiner API
+let mut miner = PowMiner::new().unwrap();
+miner.init(&prefix_fast, &suffix_fast, difficulty as i32).unwrap();
+
+while let None = miner.mine() {
+    // mining...
+}
+```
+
+The key insight: in fast mode, the suffix is always 2 bytes (`"\"]`) regardless of content length, so the GPU processes a single SHA-256 block per nonce. In standard mode, the suffix grows with content length, requiring more block transforms.
 
 ## What is Nostr?
 Perhaps you stumbled upon this project and have no idea what on earth is going on here. 
