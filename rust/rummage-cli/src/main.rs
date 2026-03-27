@@ -113,6 +113,22 @@ fn count_leading_zero_bits(hash: &[u8]) -> u32 {
     total
 }
 
+fn format_duration(secs: f64) -> String {
+    if secs < 60.0 {
+        format!("{:.0}s", secs)
+    } else if secs < 3600.0 {
+        format!("{:.0}m", secs / 60.0)
+    } else if secs < 86400.0 {
+        let h = (secs / 3600.0).floor();
+        let m = ((secs % 3600.0) / 60.0).floor();
+        format!("{:.0}h {:.0}m", h, m)
+    } else {
+        let d = (secs / 86400.0).floor();
+        let h = ((secs % 86400.0) / 3600.0).floor();
+        format!("{:.0}d {:.0}h", d, h)
+    }
+}
+
 fn is_valid_hex(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -362,10 +378,19 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
                 0.0
             };
             let nonce_cursor = miner.nonce_cursor();
+            let eta = if rate > 0.0 {
+                let expected_hashes = 2.0_f64.powi(difficulty as i32);
+                let remaining = (expected_hashes - total_attempts as f64).max(0.0);
+                let eta_secs = remaining / rate;
+                format_duration(eta_secs)
+            } else {
+                "unknown".to_string()
+            };
             println!(
-                "PoW: {} attempts, {:.2} MH/s, nonce range [{}..{})",
+                "PoW: {} attempts, {:.2} MH/s, ETA ~{}, nonce range [{}..{})",
                 total_attempts,
                 rate / 1e6,
+                eta,
                 nonce_cursor.saturating_sub(nonces_per_batch),
                 nonce_cursor
             );
