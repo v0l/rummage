@@ -237,7 +237,7 @@ fn build_pow_template_fast(
     }
     // Fixed nonce tag with value "0", then content with trailing space before nonce digits
     prefix.push_str(&format!(
-        "[\"nonce\",\"0\",\"{}\"]],\"{} ",
+        "[\"nonce\",\"0\",\"{}\"]],\"{}\\n",
         difficulty, content
     ));
 
@@ -301,7 +301,7 @@ fn build_and_sign_event(
 
     // In fast mode, the content has the nonce appended
     let final_content = if fast_mode {
-        format!("{} {}", content, nonce)
+        format!("{}\n{}", content, nonce)
     } else {
         content.to_string()
     };
@@ -510,7 +510,7 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
                 println!("\nAdd this to your event:");
                 println!("  \"created_at\": {}", created_at);
                 if fast_mode {
-                    println!("  \"content\": \"{} {}\"", content, result.nonce);
+                    println!("  \"content\": \"{}\\n{}\"", content, result.nonce);
                     println!("  [\"nonce\",\"0\",\"{}\"]", difficulty);
                 } else {
                     println!("  [\"nonce\",\"{}\",\"{}\"]", result.nonce, difficulty);
