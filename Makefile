@@ -13,6 +13,7 @@ OBJDIR = obj
 OBJET = $(addprefix $(OBJDIR)/, \
 		GPU/GPURummage.o \
 		GPU/CudaPowMiner.o \
+		GPU/rummage_ffi.o \
 		CPU/Point.o \
 		CPU/Int.o \
 		CPU/IntMod.o \
@@ -52,6 +53,13 @@ $(OBJDIR)/GPU/GPURummage.o: $(SRCDIR)/GPU/GPURummage.cu
 $(OBJDIR)/GPU/CudaPowMiner.o: $(SRCDIR)/GPU/CudaPowMiner.cu
 	$(NVCC) -allow-unsupported-compiler --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -O2 -I$(SRCDIR) -I$(CUDA)/include \
 	-gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/CudaPowMiner.o -c $(SRCDIR)/GPU/CudaPowMiner.cu
+
+$(OBJDIR)/GPU/rummage_ffi.o: $(SRCDIR)/GPU/rummage_ffi.cu
+	$(NVCC) -allow-unsupported-compiler --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -O2 -I$(SRCDIR) -I$(CUDA)/include \
+	-DNOSTR_BLOCKS_PER_GRID=$(NOSTR_BLOCKS_PER_GRID) \
+	-DNOSTR_THREADS_PER_BLOCK=$(NOSTR_THREADS_PER_BLOCK) \
+	-DKEYS_PER_THREAD_BATCH=$(KEYS_PER_THREAD_BATCH) \
+	-gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/rummage_ffi.o -c $(SRCDIR)/GPU/rummage_ffi.cu
 
 $(OBJDIR)/%.o : $(SRCDIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -o $@ -c $<

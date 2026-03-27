@@ -1,0 +1,9 @@
+[package]
+name = "rummage-rs"
+version = "0.1.0"
+edition.workspace = true
+description = "Safe Rust wrappers for the Rummage GPU Nostr mining library (CUDA)"
+license = "MIT"
+
+[dependencies]
+rummage-sys = { path = "../rummage-sys" }

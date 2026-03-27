@@ -1,0 +1,21 @@
+[package]
+name = "rummage-cli"
+version = "0.1.0"
+edition.workspace = true
+description = "GPU-accelerated Nostr mining tool (vanity keys + NIP-13 PoW)"
+license = "MIT"
+
+[[bin]]
+name = "rummage"
+path = "src/main.rs"
+
+[dependencies]
+rummage-rs = { path = "../rummage-rs" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.9"
+ctrlc = "3"
+anyhow = "1"

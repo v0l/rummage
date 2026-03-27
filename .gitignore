@@ -23,6 +23,10 @@ obj/
 *.metallib
 *.air
 
+# Rust build artifacts
+target/
+Cargo.lock
+
 # Scripts
 scripts/
 
