@@ -110,24 +110,11 @@ struct PowArgs {
 // ---------------------------------------------------------------------------
 
 /// Escape a string for embedding inside a JSON double-quoted string.
-/// Handles the characters that JSON requires to be escaped per RFC 8259.
+/// Uses serde_json for RFC 8259 compliant escaping, then strips the outer quotes.
 fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                // Other control characters use \uXXXX
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
+    let quoted = serde_json::to_string(s).expect("string serialization cannot fail");
+    // serde_json::to_string wraps in quotes: "\"escaped\"" → strip them
+    quoted[1..quoted.len() - 1].to_string()
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {

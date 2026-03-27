@@ -12,7 +12,7 @@ name = "rummage"
 path = "src/main.rs"
 
 [dependencies]
-rummage-rs = { path = "../rummage-rs", version = "0.2.2" }
+rummage-rs = { path = "../rummage-rs", version = "0.2.3" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
