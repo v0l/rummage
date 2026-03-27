@@ -61,6 +61,10 @@ int rummage_pow_stream_count(const RummagePow *h) {
     return h ? h->inner.getStreamCount() : 0;
 }
 
+int rummage_pow_nonces_per_thread(const RummagePow *h) {
+    return h ? h->inner.getNoncesPerThread() : 0;
+}
+
 void rummage_pow_cleanup(RummagePow *h) {
     if (h) h->inner.cleanup();
 }

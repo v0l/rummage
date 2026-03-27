@@ -21,17 +21,11 @@ let suffix = r#"","21"]],"hello"]"#;
 let mut miner = PowMiner::new().expect("GPU init");
 miner.init(prefix, suffix, 21).expect("init failed");
 
-let threads = miner.thread_count();
-let streams = miner.stream_count();
-let nonces_per_batch = threads as u64 * 128 * streams as u64;
-
-let mut nonce_start = 0u64;
 loop {
-    if let Some(result) = miner.mine_batch(nonce_start, threads) {
+    if let Some(result) = miner.mine() {
         println!("Found nonce {} with {} bits", result.nonce, result.difficulty);
         break;
     }
-    nonce_start += nonces_per_batch;
 }
 ```
 

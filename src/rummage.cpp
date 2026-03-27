@@ -484,9 +484,7 @@ int main(int argc, char **argv) {
 
         uint32_t batchSize = miner.getThreadCount();
         int numStreams = miner.getStreamCount();
-        // Each thread tries NONCES_PER_THREAD nonces (defined in CudaPowMiner.cu)
-        // We define it here too for the host-side accounting
-        const int noncesPerThread = 128;
+        int noncesPerThread = miner.getNoncesPerThread();
         // Total nonces per mineBatch call = threads * nonces/thread * streams
         uint64_t noncesPerBatch = (uint64_t)batchSize * noncesPerThread * numStreams;
         uint64_t nonceStart = 0;

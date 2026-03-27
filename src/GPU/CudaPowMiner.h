@@ -52,6 +52,9 @@ public:
     // Get the number of CUDA streams
     int getStreamCount() const;
 
+    // Get the number of nonces each thread processes per launch
+    int getNoncesPerThread() const;
+
 private:
     CudaPowContext *ctx;
     bool initialized;

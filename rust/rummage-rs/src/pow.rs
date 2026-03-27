@@ -3,8 +3,8 @@ use std::fmt;
 
 use rummage_sys::{
     rummage_pow_cleanup, rummage_pow_destroy, rummage_pow_init, rummage_pow_mine_batch,
-    rummage_pow_new, rummage_pow_stream_count, rummage_pow_thread_count, RummagePow,
-    RummagePowResult,
+    rummage_pow_new, rummage_pow_nonces_per_thread, rummage_pow_stream_count,
+    rummage_pow_thread_count, RummagePow, RummagePowResult,
 };
 
 /// Result of a successful PoW mining operation.
@@ -33,6 +33,12 @@ pub struct PowResult {
 /// ```
 pub struct PowMiner {
     handle: *mut RummagePow,
+    /// Current nonce cursor, auto-advanced by [`mine`](Self::mine).
+    nonce_cursor: u64,
+    /// Cached: threads * nonces_per_thread * streams.
+    nonces_per_batch: u64,
+    /// Cached: thread count (= batch_size for kernel launch).
+    batch_size: u32,
 }
 
 // The GPU handle is not tied to a specific thread.
@@ -45,13 +51,18 @@ impl PowMiner {
         if handle.is_null() {
             None
         } else {
-            Some(Self { handle })
+            Some(Self {
+                handle,
+                nonce_cursor: 0,
+                nonces_per_batch: 0,
+                batch_size: 0,
+            })
         }
     }
 
     /// Initialise the GPU miner with a split event template.
     ///
-    /// Must be called before [`mine_batch`](Self::mine_batch).
+    /// Must be called before [`mine`](Self::mine).
     /// Can be called again to reinitialise with a new template
     /// (e.g. after refreshing `created_at`), but call [`cleanup`](Self::cleanup) first.
     pub fn init(
@@ -71,18 +82,43 @@ impl PowMiner {
             )
         };
         if ok != 0 {
+            // Cache the auto-tuned parameters so callers don't need them.
+            self.batch_size = unsafe { rummage_pow_thread_count(self.handle) };
+            let streams = unsafe { rummage_pow_stream_count(self.handle) };
+            let npt = unsafe { rummage_pow_nonces_per_thread(self.handle) };
+            self.nonces_per_batch = self.batch_size as u64 * npt as u64 * streams as u64;
+            self.nonce_cursor = 0;
             Ok(())
         } else {
             Err(Error::InitFailed)
         }
     }
 
-    /// Run one batch of nonce mining on the GPU.
+    /// Run one batch of mining with automatic nonce advancement.
     ///
-    /// `nonce_start` — first nonce to try.  
-    /// `batch_size` — should equal [`thread_count`](Self::thread_count) for optimal occupancy.
+    /// Each call dispatches optimal work to the GPU and advances the internal
+    /// nonce cursor.  Just call this in a loop:
     ///
-    /// Returns `Some(PowResult)` if a valid nonce was found, `None` otherwise.
+    /// ```no_run
+    /// # let mut miner = rummage_rs::PowMiner::new().unwrap();
+    /// # miner.init(r#"[0,"ab",0,1,[["nonce",""#, r#"","1"]],""]"#, 1).unwrap();
+    /// loop {
+    ///     if let Some(result) = miner.mine() {
+    ///         println!("nonce={} bits={}", result.nonce, result.difficulty);
+    ///         break;
+    ///     }
+    /// }
+    /// ```
+    pub fn mine(&mut self) -> Option<PowResult> {
+        let result = self.mine_batch(self.nonce_cursor, self.batch_size);
+        self.nonce_cursor += self.nonces_per_batch;
+        result
+    }
+
+    /// Run one batch of nonce mining with explicit parameters.
+    ///
+    /// Prefer [`mine`](Self::mine) unless you need manual control over
+    /// nonce ranges (e.g. distributing work across multiple GPUs).
     pub fn mine_batch(&mut self, nonce_start: u64, batch_size: u32) -> Option<PowResult> {
         let mut raw = RummagePowResult::default();
         let found =
@@ -98,14 +134,36 @@ impl PowMiner {
         }
     }
 
+    /// Total nonces tested per [`mine`](Self::mine) call.
+    ///
+    /// This is auto-tuned based on the GPU (threads × nonces/thread × streams).
+    pub fn nonces_per_batch(&self) -> u64 {
+        self.nonces_per_batch
+    }
+
+    /// Current nonce cursor position (next value [`mine`](Self::mine) will start from).
+    pub fn nonce_cursor(&self) -> u64 {
+        self.nonce_cursor
+    }
+
+    /// Reset the nonce cursor to a specific value.
+    pub fn set_nonce_cursor(&mut self, nonce: u64) {
+        self.nonce_cursor = nonce;
+    }
+
     /// Number of CUDA threads launched per stream per batch.
     pub fn thread_count(&self) -> u32 {
-        unsafe { rummage_pow_thread_count(self.handle) }
+        self.batch_size
     }
 
     /// Number of CUDA streams used for async dispatch.
     pub fn stream_count(&self) -> i32 {
         unsafe { rummage_pow_stream_count(self.handle) }
+    }
+
+    /// Number of nonces each GPU thread processes per launch.
+    pub fn nonces_per_thread(&self) -> i32 {
+        unsafe { rummage_pow_nonces_per_thread(self.handle) }
     }
 
     /// Release GPU resources without destroying the handle.

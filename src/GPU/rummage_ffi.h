@@ -55,6 +55,9 @@ uint32_t rummage_pow_thread_count(const RummagePow *handle);
 /** Get the number of CUDA streams. */
 int rummage_pow_stream_count(const RummagePow *handle);
 
+/** Get the number of nonces each thread processes per launch. */
+int rummage_pow_nonces_per_thread(const RummagePow *handle);
+
 /** Release GPU resources (can be re-init'd afterwards). */
 void rummage_pow_cleanup(RummagePow *handle);
 

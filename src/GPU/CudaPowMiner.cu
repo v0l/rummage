@@ -1,7 +1,7 @@
 /*
  * CudaPowMiner - GPU-accelerated Proof of Work mining for Nostr events (NIP-13)
  *
- * Optimized for NVIDIA Blackwell (sm_120, 188 SMs).
+ * Auto-tunes grid sizing via CUDA occupancy API for any NVIDIA GPU (sm_50+).
  *
  * Key optimizations:
  *   1. SHA256 midstate pre-computation: the host processes all full 64-byte
@@ -16,7 +16,7 @@
  *      constant, so W words covering those positions are computed once per thread.
  *   6. __clz() intrinsic for fast leading-zero-bit check.
  *   7. Prefix/suffix in __constant__ memory for broadcast reads.
- *   8. __launch_bounds__ for optimal register allocation.
+ *   8. CUDA occupancy API for runtime-optimal grid sizing on any GPU.
  *   9. CUDA streams for async kernel dispatch with pinned host memory.
  */
 
@@ -221,7 +221,7 @@ __device__ __forceinline__ int pow_inc_nonce_buf(char *buf, int len) {
 // Optimized PoW Mining Kernel
 // ============================================================================
 
-__global__ void __launch_bounds__(POW_THREADS_PER_BLOCK, 5)
+__global__ void __launch_bounds__(POW_THREADS_PER_BLOCK)
 PowMineKernel(
     uint64_t nonceStart,        // first nonce for this launch
     int *d_found,               // 0 = not found, 1 = found
@@ -515,9 +515,14 @@ bool CudaPowMiner::init(const std::string &prefix, const std::string &suffix, in
     PowCudaSafe(cudaMemcpyToSymbol(d_prefixTotalLen, &ptl, sizeof(uint32_t)));
     PowCudaSafe(cudaMemcpyToSymbol(d_targetDifficulty, &targetDifficulty, sizeof(int)));
 
-    // Grid sizing: with __launch_bounds__(256, 5) the compiler targets 5 blocks/SM
-    // (48 regs * 256 threads = 12288 regs/block; 5 * 12288 = 61440 <= 65536)
-    ctx->blocksPerGrid = ctx->smCount * 5;
+    // Use CUDA occupancy API to determine optimal blocks/SM for this GPU.
+    // This replaces the previous hardcoded "5 blocks/SM" which assumed Blackwell.
+    int blocksPerSM = 0;
+    PowCudaSafe(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &blocksPerSM, PowMineKernel, POW_THREADS_PER_BLOCK, 0));
+    if (blocksPerSM < 1) blocksPerSM = 1;
+    ctx->blocksPerGrid = ctx->smCount * blocksPerSM;
+    printf("PoW Miner: occupancy = %d blocks/SM (auto-tuned)\n", blocksPerSM);
 
     uint32_t threadsPerLaunch = ctx->blocksPerGrid * POW_THREADS_PER_BLOCK;
     uint64_t noncesPerLaunch = (uint64_t)threadsPerLaunch * NONCES_PER_THREAD;
@@ -625,4 +630,8 @@ uint32_t CudaPowMiner::getThreadCount() const {
 int CudaPowMiner::getStreamCount() const {
     if (!ctx) return 0;
     return NUM_STREAMS;
+}
+
+int CudaPowMiner::getNoncesPerThread() const {
+    return NONCES_PER_THREAD;
 }

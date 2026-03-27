@@ -17,7 +17,6 @@ const BANNER: &str = r#"
         ╚═══════╝
 "#;
 
-const NONCES_PER_THREAD: u64 = 128;
 const BECH32_CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
 // ---------------------------------------------------------------------------
@@ -269,11 +268,8 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
     let mut miner = PowMiner::new().ok_or_else(|| anyhow::anyhow!("failed to create GPU miner"))?;
     miner.init(&prefix, &suffix, difficulty as i32)?;
 
-    let batch_size = miner.thread_count();
-    let num_streams = miner.stream_count();
-    let nonces_per_batch = batch_size as u64 * NONCES_PER_THREAD * num_streams as u64;
+    let nonces_per_batch = miner.nonces_per_batch();
 
-    let mut nonce_start: u64 = 0;
     let mut total_attempts: u64 = 0;
 
     let ts_refresh_secs = 30u64;
@@ -288,7 +284,7 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
     );
 
     while running.load(Ordering::SeqCst) {
-        if let Some(result) = miner.mine_batch(nonce_start, batch_size) {
+        if let Some(result) = miner.mine() {
             total_attempts += nonces_per_batch;
             let elapsed_ms = start_time.elapsed().as_millis() as f64;
 
@@ -329,7 +325,6 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
         }
 
         total_attempts += nonces_per_batch;
-        nonce_start += nonces_per_batch;
 
         let now = Instant::now();
 
@@ -352,7 +347,7 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
                 // suffix never changes (doesn't contain created_at)
 
                 miner.init(&prefix, &suffix, difficulty as i32)?;
-                nonce_start = 0;
+                miner.set_nonce_cursor(0);
                 println!("PoW: refreshed created_at to {}, reset nonce", created_at);
             }
             last_ts_refresh = now;
@@ -366,12 +361,13 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
             } else {
                 0.0
             };
+            let nonce_cursor = miner.nonce_cursor();
             println!(
                 "PoW: {} attempts, {:.2} MH/s, nonce range [{}..{})",
                 total_attempts,
                 rate / 1e6,
-                nonce_start.saturating_sub(nonces_per_batch),
-                nonce_start
+                nonce_cursor.saturating_sub(nonces_per_batch),
+                nonce_cursor
             );
             last_report = now;
         }
