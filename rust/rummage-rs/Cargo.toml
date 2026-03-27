@@ -8,4 +8,4 @@ description = "Safe Rust wrappers for the Rummage GPU Nostr mining library (CUDA
 readme = "README.md"
 
 [dependencies]
-rummage-sys = { path = "../rummage-sys", version = "0.2.1" }
+rummage-sys = { path = "../rummage-sys", version = "0.2.2" }
