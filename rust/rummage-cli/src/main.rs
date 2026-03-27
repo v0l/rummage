@@ -109,6 +109,27 @@ struct PowArgs {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Escape a string for embedding inside a JSON double-quoted string.
+/// Handles the characters that JSON requires to be escaped per RFC 8259.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                // Other control characters use \uXXXX
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
@@ -173,6 +194,7 @@ fn bech32_to_hex(bech32_pattern: &str) -> String {
 
 /// Extract the inner content of "tags": [...] from the raw JSON string,
 /// returning only what is between the outer brackets (exclusive).
+/// Correctly handles brackets inside JSON string values.
 fn extract_tags_inner(json: &str) -> Option<String> {
     let tags_pos = json.find("\"tags\"")?;
     let after_key = &json[tags_pos + 6..];
@@ -180,7 +202,25 @@ fn extract_tags_inner(json: &str) -> Option<String> {
     let slice = &after_key[arr_start..];
 
     let mut depth = 1i32;
+    let mut in_string = false;
+    let mut escape_next = false;
+
     for (i, ch) in slice.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
         match ch {
             '[' => depth += 1,
             ']' => {
@@ -208,6 +248,7 @@ fn build_pow_template(
     content: &str,
     difficulty: u32,
 ) -> (String, String) {
+    let escaped = json_escape(content);
     let mut prefix = format!("[0,\"{}\",{},{},[", pubkey, created_at, kind);
     if let Some(tags) = existing_tags {
         prefix.push_str(tags);
@@ -215,12 +256,12 @@ fn build_pow_template(
     }
     prefix.push_str("[\"nonce\",\"");
 
-    let suffix = format!("\",\"{}\"]],\"{}\"]", difficulty, content);
+    let suffix = format!("\",\"{}\"]],\"{}\"]", difficulty, escaped);
     (prefix, suffix)
 }
 
 /// Build template for fast mode: nonce varies inside content, nonce tag is fixed to "0".
-/// Serialization: [0,"<pk>",<ts>,<kind>,[...["nonce","0","<diff>"]],\"<content> <NONCE>"]
+/// Serialization: [0,"<pk>",<ts>,<kind>,[...["nonce","0","<diff>"]],\"<content>\n<NONCE>"]
 /// The nonce digits appear right before the closing "], giving a minimal suffix.
 fn build_pow_template_fast(
     pubkey: &str,
@@ -230,15 +271,16 @@ fn build_pow_template_fast(
     content: &str,
     difficulty: u32,
 ) -> (String, String) {
+    let escaped = json_escape(content);
     let mut prefix = format!("[0,\"{}\",{},{},[", pubkey, created_at, kind);
     if let Some(tags) = existing_tags {
         prefix.push_str(tags);
         prefix.push(',');
     }
-    // Fixed nonce tag with value "0", then content with trailing space before nonce digits
+    // Fixed nonce tag with value "0", then content with trailing newline before nonce digits
     prefix.push_str(&format!(
         "[\"nonce\",\"0\",\"{}\"]],\"{}\\n",
-        difficulty, content
+        difficulty, escaped
     ));
 
     let suffix = "\"]".to_string();
@@ -847,5 +889,910 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Pow(args) => run_pow(args),
         Command::Vanity(args) => run_vanity(args),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    const TEST_PUBKEY: &str =
+        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const TEST_TS: u32 = 1700000000;
+
+    // -----------------------------------------------------------------------
+    // json_escape
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_escape_plain_ascii() {
+        assert_eq!(json_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn json_escape_quotes_and_backslash() {
+        assert_eq!(json_escape(r#"say "hello""#), r#"say \"hello\""#);
+        assert_eq!(json_escape(r"back\slash"), r"back\\slash");
+    }
+
+    #[test]
+    fn json_escape_newline_tab_cr() {
+        assert_eq!(json_escape("line1\nline2"), r"line1\nline2");
+        assert_eq!(json_escape("col1\tcol2"), r"col1\tcol2");
+        assert_eq!(json_escape("cr\rhere"), r"cr\rhere");
+    }
+
+    #[test]
+    fn json_escape_control_chars() {
+        // NUL, BEL, etc. should become \u00XX
+        assert_eq!(json_escape("\x00"), r"\u0000");
+        assert_eq!(json_escape("\x07"), r"\u0007");
+        assert_eq!(json_escape("\x1f"), r"\u001f");
+    }
+
+    #[test]
+    fn json_escape_unicode_passthrough() {
+        // Unicode chars above U+001F should pass through unescaped
+        assert_eq!(json_escape("こんにちは"), "こんにちは");
+        assert_eq!(json_escape("🤙⚡"), "🤙⚡");
+        assert_eq!(json_escape("Ñoño"), "Ñoño");
+    }
+
+    #[test]
+    fn json_escape_mixed() {
+        assert_eq!(
+            json_escape("he said \"こんにちは\"\nnew line"),
+            r#"he said \"こんにちは\"\nnew line"#
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_tags_inner
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_tags_empty_array() {
+        let json = r#"{"tags":[],"content":"hi"}"#;
+        assert_eq!(extract_tags_inner(json), None);
+    }
+
+    #[test]
+    fn extract_tags_single_tag() {
+        let json = r#"{"tags":[["p","abc"]],"content":"hi"}"#;
+        assert_eq!(
+            extract_tags_inner(json),
+            Some(r#"["p","abc"]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extract_tags_multiple_tags() {
+        let json = r#"{"tags":[["p","abc"],["e","def"]],"content":"hi"}"#;
+        assert_eq!(
+            extract_tags_inner(json),
+            Some(r#"["p","abc"],["e","def"]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extract_tags_with_brackets_in_strings() {
+        // Tag values containing bracket characters — should NOT confuse the parser
+        let json = r#"{"tags":[["t","[test]"],["d","arr[0]"]],"content":"hi"}"#;
+        assert_eq!(
+            extract_tags_inner(json),
+            Some(r#"["t","[test]"],["d","arr[0]"]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extract_tags_with_escaped_quotes_in_strings() {
+        // Tag values containing escaped quotes
+        let json = r#"{"tags":[["t","say \"hi\""]],"content":"x"}"#;
+        assert_eq!(
+            extract_tags_inner(json),
+            Some(r#"["t","say \"hi\""]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extract_tags_with_nested_json_in_string() {
+        // A tag value that is itself a JSON string containing brackets
+        let json = r#"{"tags":[["description","{\"name\":\"test\",\"arr\":[1,2,3]}"]],"content":""}"#;
+        assert_eq!(
+            extract_tags_inner(json),
+            Some(r#"["description","{\"name\":\"test\",\"arr\":[1,2,3]}"]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extract_tags_whitespace_preserved() {
+        // Whitespace inside the tags array should be preserved
+        let json = r#"{"tags": [ ["p", "abc"] ], "content": "hi"}"#;
+        assert_eq!(
+            extract_tags_inner(json),
+            Some(r#"["p", "abc"]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extract_tags_no_tags_key() {
+        let json = r#"{"content":"hi"}"#;
+        assert_eq!(extract_tags_inner(json), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // build_pow_template — structure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn template_standard_no_tags() {
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, "hello", 21);
+        // prefix ends with ["nonce","
+        assert!(prefix.ends_with("[\"nonce\",\""));
+        // Inserting nonce "42" should give valid NIP-01 serialization
+        let full = format!("{}42{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"nonce\",\"42\",\"21\"]],\"hello\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_standard_with_tags() {
+        let tags = Some(r#"["p","deadbeef"]"#.to_string());
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &tags, "gm", 32);
+        let full = format!("{}99{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"p\",\"deadbeef\"],[\"nonce\",\"99\",\"32\"]],\"gm\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_fast_no_tags() {
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, "hello", 21);
+        assert_eq!(suffix, "\"]");
+        let full = format!("{}42{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"nonce\",\"0\",\"21\"]],\"hello\\n42\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_fast_with_tags() {
+        let tags = Some(r#"["e","cafebabe"]"#.to_string());
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &tags, "gm", 40);
+        let full = format!("{}12345{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"e\",\"cafebabe\"],[\"nonce\",\"0\",\"40\"]],\"gm\\n12345\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Content with special characters — JSON escaping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn template_content_with_quotes() {
+        let content = r#"he said "hello""#; // unescaped content from serde
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        // The content in the serialization must have escaped quotes
+        assert!(full.contains(r#"\"he said \\\"hello\\\"\""#) || full.contains(r#""he said \"hello\""]"#));
+        // More precisely, verify the exact structure
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"nonce\",\"0\",\"21\"]],\"he said \\\"hello\\\"\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_content_with_backslash() {
+        let content = r"C:\Users\nostr"; // unescaped
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"nonce\",\"0\",\"21\"]],\"C:\\\\Users\\\\nostr\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_content_with_newlines() {
+        let content = "line1\nline2\nline3"; // unescaped newlines
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"nonce\",\"0\",\"21\"]],\"line1\\nline2\\nline3\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_content_with_tabs() {
+        let content = "col1\tcol2";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"col1\\tcol2\"]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Unicode content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn template_content_japanese() {
+        let content = "こんにちは世界";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"こんにちは世界\"]"));
+    }
+
+    #[test]
+    fn template_content_chinese() {
+        let content = "你好世界";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"你好世界\"]"));
+    }
+
+    #[test]
+    fn template_content_arabic() {
+        let content = "مرحبا بالعالم";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"مرحبا بالعالم\"]"));
+    }
+
+    #[test]
+    fn template_content_emoji() {
+        let content = "gm ☀️ nostr 🤙⚡🫂";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"gm ☀️ nostr 🤙⚡🫂\"]"));
+    }
+
+    #[test]
+    fn template_content_korean() {
+        let content = "안녕하세요";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"안녕하세요\"]"));
+    }
+
+    #[test]
+    fn template_content_mixed_scripts() {
+        let content = "Hello 世界 مرحبا 🌍";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"Hello 世界 مرحبا 🌍\"]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Content containing code / JSON
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn template_content_json_string() {
+        // Content is a JSON object as a string (like a kind 0 metadata)
+        let content = r#"{"name":"satoshi","about":"[creator]"}"#;
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 0, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},0,[[\"nonce\",\"0\",\"21\"]],\"{{\\\"name\\\":\\\"satoshi\\\",\\\"about\\\":\\\"[creator]\\\"}}\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_content_code_snippet() {
+        let content = "fn main() {\n    println!(\"hello\");\n}";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        // Should have escaped newlines and escaped quotes
+        assert!(full.contains("fn main() {\\n    println!(\\\"hello\\\");\\n}"));
+        // Actually let's be precise
+        assert!(full.ends_with(
+            "\"fn main() {\\n    println!(\\\"hello\\\");\\n}\"]"
+        ));
+    }
+
+    #[test]
+    fn template_content_html() {
+        let content = "<script>alert(\"xss\")</script>";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with(
+            "\"<script>alert(\\\"xss\\\")</script>\"]"
+        ));
+    }
+
+    #[test]
+    fn template_content_markdown_with_brackets() {
+        let content = "Check [this](https://example.com) and `arr[0]`";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        // Brackets and parens don't need escaping in JSON
+        assert!(full.ends_with(
+            "\"Check [this](https://example.com) and `arr[0]`\"]"
+        ));
+    }
+
+    #[test]
+    fn template_content_sql_injection() {
+        let content = "Robert'); DROP TABLE students;--";
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}0{}", prefix, suffix);
+        assert!(full.ends_with("\"Robert'); DROP TABLE students;--\"]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Fast mode with special content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn template_fast_content_with_quotes() {
+        let content = r#"he said "gm""#;
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}42{}", prefix, suffix);
+        assert_eq!(
+            full,
+            format!(
+                "[0,\"{}\",{},1,[[\"nonce\",\"0\",\"21\"]],\"he said \\\"gm\\\"\\n42\"]",
+                TEST_PUBKEY, TEST_TS
+            )
+        );
+    }
+
+    #[test]
+    fn template_fast_content_with_unicode() {
+        let content = "⚡ zapping ⚡";
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}99{}", prefix, suffix);
+        assert!(full.contains("⚡ zapping ⚡\\n99\"]"));
+    }
+
+    #[test]
+    fn template_fast_content_with_newlines() {
+        let content = "line1\nline2";
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}7{}", prefix, suffix);
+        // The original newline in content is escaped, then \n separator, then nonce
+        assert!(full.ends_with("\"line1\\nline2\\n7\"]"));
+    }
+
+    #[test]
+    fn template_fast_content_json() {
+        let content = r#"{"key":"value"}"#;
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+        let full = format!("{}1{}", prefix, suffix);
+        assert!(full.ends_with(
+            "\"{\\\"key\\\":\\\"value\\\"}\\n1\"]"
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end: template + SHA-256 matches NIP-01 event ID
+    // -----------------------------------------------------------------------
+
+    /// Build a NIP-01 serialization the "reference" way using serde_json,
+    /// and verify it matches what our template produces.
+    fn reference_nip01_serialize(
+        pubkey: &str,
+        created_at: u32,
+        kind: i64,
+        tags: &serde_json::Value,
+        content: &str,
+    ) -> String {
+        // NIP-01: [0,"<pubkey>",<created_at>,<kind>,<tags>,"<content>"]
+        let arr = serde_json::json!([
+            0,
+            pubkey,
+            created_at,
+            kind,
+            tags,
+            content
+        ]);
+        // serde_json::to_string produces compact JSON without spaces
+        serde_json::to_string(&arr).unwrap()
+    }
+
+    #[test]
+    fn e2e_standard_simple_content() {
+        let content = "hello world";
+        let nonce = 12345u64;
+        let difficulty = 21u32;
+
+        let tags_json: serde_json::Value =
+            serde_json::json!([["nonce", nonce.to_string(), difficulty.to_string()]]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            content,
+        );
+
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+
+        // SHA-256 should also match
+        let ref_hash = Sha256::digest(reference.as_bytes());
+        let tpl_hash = Sha256::digest(template_result.as_bytes());
+        assert_eq!(ref_hash, tpl_hash);
+    }
+
+    #[test]
+    fn e2e_standard_unicode_content() {
+        let content = "gm 🤙 こんにちは \"nostr\"";
+        let nonce = 999u64;
+        let difficulty = 32u32;
+
+        let tags_json: serde_json::Value =
+            serde_json::json!([["nonce", nonce.to_string(), difficulty.to_string()]]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            content,
+        );
+
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    #[test]
+    fn e2e_standard_json_in_content() {
+        let content = "{\"name\":\"test\",\"arr\":[1,2]}";
+        let nonce = 42u64;
+        let difficulty = 21u32;
+
+        let tags_json: serde_json::Value =
+            serde_json::json!([["nonce", nonce.to_string(), difficulty.to_string()]]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            0,
+            &tags_json,
+            content,
+        );
+
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 0, &None, content, difficulty);
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    #[test]
+    fn e2e_standard_multiline_content() {
+        let content = "line 1\nline 2\nline 3";
+        let nonce = 7u64;
+        let difficulty = 21u32;
+
+        let tags_json: serde_json::Value =
+            serde_json::json!([["nonce", nonce.to_string(), difficulty.to_string()]]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            content,
+        );
+
+        let (prefix, suffix) =
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    #[test]
+    fn e2e_standard_with_existing_tags() {
+        let content = "tagged post";
+        let nonce = 100u64;
+        let difficulty = 21u32;
+
+        // The existing tags as raw JSON (what extract_tags_inner would return)
+        let existing_tags = Some(r#"["p","aabbccdd"],["e","11223344"]"#.to_string());
+
+        let tags_json: serde_json::Value = serde_json::json!([
+            ["p", "aabbccdd"],
+            ["e", "11223344"],
+            ["nonce", nonce.to_string(), difficulty.to_string()]
+        ]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            content,
+        );
+
+        let (prefix, suffix) = build_pow_template(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &existing_tags,
+            content,
+            difficulty,
+        );
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    #[test]
+    fn e2e_fast_simple_content() {
+        let content = "hello world";
+        let nonce = 12345u64;
+        let difficulty = 21u32;
+
+        // In fast mode, nonce tag is "0", content has nonce appended
+        let fast_content = format!("{}\n{}", content, nonce);
+        let tags_json: serde_json::Value =
+            serde_json::json!([["nonce", "0", difficulty.to_string()]]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            &fast_content,
+        );
+
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    #[test]
+    fn e2e_fast_unicode_content() {
+        let content = "⚡ zapping ⚡ 你好";
+        let nonce = 777u64;
+        let difficulty = 40u32;
+
+        let fast_content = format!("{}\n{}", content, nonce);
+        let tags_json: serde_json::Value =
+            serde_json::json!([["nonce", "0", difficulty.to_string()]]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            &fast_content,
+        );
+
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    #[test]
+    fn e2e_fast_json_in_content() {
+        let content = "{\"key\":\"val\"}";
+        let nonce = 1u64;
+        let difficulty = 21u32;
+
+        let fast_content = format!("{}\n{}", content, nonce);
+        let tags_json: serde_json::Value =
+            serde_json::json!([["nonce", "0", difficulty.to_string()]]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            &fast_content,
+        );
+
+        let (prefix, suffix) =
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    #[test]
+    fn e2e_fast_with_existing_tags() {
+        let content = "tagged";
+        let nonce = 50u64;
+        let difficulty = 21u32;
+
+        let existing_tags = Some(r#"["t","nostr"]"#.to_string());
+        let fast_content = format!("{}\n{}", content, nonce);
+
+        let tags_json: serde_json::Value = serde_json::json!([
+            ["t", "nostr"],
+            ["nonce", "0", difficulty.to_string()]
+        ]);
+
+        let reference = reference_nip01_serialize(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &tags_json,
+            &fast_content,
+        );
+
+        let (prefix, suffix) = build_pow_template_fast(
+            TEST_PUBKEY,
+            TEST_TS,
+            1,
+            &existing_tags,
+            content,
+            difficulty,
+        );
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        assert_eq!(template_result, reference);
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end: full pipeline from input JSON to template
+    // -----------------------------------------------------------------------
+
+    /// Simulate the full pipeline: parse JSON -> extract fields -> build template
+    /// and verify the result matches NIP-01 reference serialization.
+    fn verify_pipeline(input_json: &str, nonce: u64, difficulty: u32, fast: bool) {
+        let event: serde_json::Value = serde_json::from_str(input_json).unwrap();
+        let pubkey = event["pubkey"].as_str().unwrap();
+        let created_at = event["created_at"].as_u64().unwrap() as u32;
+        let kind = event["kind"].as_i64().unwrap();
+        let content = event["content"].as_str().unwrap_or("");
+        let existing_tags = extract_tags_inner(input_json);
+
+        let (prefix, suffix) = if fast {
+            build_pow_template_fast(pubkey, created_at, kind, &existing_tags, content, difficulty)
+        } else {
+            build_pow_template(pubkey, created_at, kind, &existing_tags, content, difficulty)
+        };
+        let template_result = format!("{}{}{}", prefix, nonce, suffix);
+
+        // Build reference
+        let mut tags: Vec<serde_json::Value> = Vec::new();
+        if let Some(arr) = event["tags"].as_array() {
+            tags.extend(arr.iter().cloned());
+        }
+        if fast {
+            tags.push(serde_json::json!(["nonce", "0", difficulty.to_string()]));
+            let fast_content = format!("{}\n{}", content, nonce);
+            let reference = reference_nip01_serialize(pubkey, created_at, kind, &serde_json::Value::Array(tags), &fast_content);
+            assert_eq!(template_result, reference, "fast mode mismatch for input: {}", input_json);
+        } else {
+            tags.push(serde_json::json!(["nonce", nonce.to_string(), difficulty.to_string()]));
+            let reference = reference_nip01_serialize(pubkey, created_at, kind, &serde_json::Value::Array(tags), content);
+            assert_eq!(template_result, reference, "standard mode mismatch for input: {}", input_json);
+        }
+    }
+
+    #[test]
+    fn pipeline_simple() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"hello"}"#;
+        verify_pipeline(json, 42, 21, false);
+        verify_pipeline(json, 42, 21, true);
+    }
+
+    #[test]
+    fn pipeline_unicode_japanese() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"こんにちは世界"}"#;
+        verify_pipeline(json, 12345, 32, false);
+        verify_pipeline(json, 12345, 32, true);
+    }
+
+    #[test]
+    fn pipeline_unicode_emoji() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"gm 🤙⚡ nostr"}"#;
+        verify_pipeline(json, 999, 21, false);
+        verify_pipeline(json, 999, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_with_quotes() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"he said \"hello\""}"#;
+        verify_pipeline(json, 1, 21, false);
+        verify_pipeline(json, 1, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_with_backslash() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"C:\\Users\\nostr"}"#;
+        verify_pipeline(json, 7, 21, false);
+        verify_pipeline(json, 7, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_with_newlines() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"line1\nline2\nline3"}"#;
+        verify_pipeline(json, 100, 21, false);
+        verify_pipeline(json, 100, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_json_object() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":0,"tags":[],"content":"{\"name\":\"satoshi\",\"about\":\"[creator]\"}"}"#;
+        verify_pipeline(json, 42, 21, false);
+        verify_pipeline(json, 42, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_code() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"fn main() {\n    println!(\"hello\");\n}"}"#;
+        verify_pipeline(json, 5, 21, false);
+        verify_pipeline(json, 5, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_html() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"<div class=\"test\">hello & world</div>"}"#;
+        verify_pipeline(json, 3, 21, false);
+        verify_pipeline(json, 3, 21, true);
+    }
+
+    #[test]
+    fn pipeline_with_existing_tags() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[["p","aabbccdd"],["e","11223344"]],"content":"tagged post"}"#;
+        verify_pipeline(json, 500, 32, false);
+        verify_pipeline(json, 500, 32, true);
+    }
+
+    #[test]
+    fn pipeline_with_tags_containing_brackets() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[["t","[test]"]],"content":"bracket tags"}"#;
+        verify_pipeline(json, 10, 21, false);
+        verify_pipeline(json, 10, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_chinese_with_quotes() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"你好 \"世界\" 🌍"}"#;
+        verify_pipeline(json, 88, 21, false);
+        verify_pipeline(json, 88, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_arabic() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"مرحبا بالعالم"}"#;
+        verify_pipeline(json, 256, 21, false);
+        verify_pipeline(json, 256, 21, true);
+    }
+
+    #[test]
+    fn pipeline_empty_content() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":""}"#;
+        verify_pipeline(json, 1, 21, false);
+        verify_pipeline(json, 1, 21, true);
+    }
+
+    #[test]
+    fn pipeline_content_tab_and_cr() {
+        let json = r#"{"pubkey":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","created_at":1700000000,"kind":1,"tags":[],"content":"col1\tcol2\rend"}"#;
+        verify_pipeline(json, 77, 21, false);
+        verify_pipeline(json, 77, 21, true);
+    }
+
+    #[test]
+    fn pipeline_kind_30023_long_form() {
+        // NIP-23 long-form content with markdown
+        let json = "{\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"created_at\":1700000000,\"kind\":30023,\"tags\":[[\"d\",\"my-article\"],[\"title\",\"Test Article\"]],\"content\":\"# Hello\\n\\nThis is a **test** with [links](https://example.com) and `code`.\"}";
+        verify_pipeline(json, 999, 21, false);
+        verify_pipeline(json, 999, 21, true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers: count_leading_zero_bits
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn leading_zeros_all_zero() {
+        assert_eq!(count_leading_zero_bits(&[0, 0, 0, 0]), 32);
+    }
+
+    #[test]
+    fn leading_zeros_first_byte_nonzero() {
+        assert_eq!(count_leading_zero_bits(&[0x0f, 0, 0, 0]), 4);
+        assert_eq!(count_leading_zero_bits(&[0x01, 0, 0, 0]), 7);
+        assert_eq!(count_leading_zero_bits(&[0x80, 0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn leading_zeros_second_byte() {
+        assert_eq!(count_leading_zero_bits(&[0x00, 0x01, 0, 0]), 15);
+        assert_eq!(count_leading_zero_bits(&[0x00, 0x00, 0x0f, 0]), 20);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers: format_duration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(30.0), "30s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(150.0), "2m");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(3700.0), "1h 1m");
+    }
+
+    #[test]
+    fn format_duration_days() {
+        assert_eq!(format_duration(90000.0), "1d 1h");
     }
 }
