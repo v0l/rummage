@@ -32,6 +32,10 @@ NOSTR_BLOCKS_PER_GRID   = 3072
 NOSTR_THREADS_PER_BLOCK = 256
 KEYS_PER_THREAD_BATCH   = 256
 
+# Extra defines for CudaPowMiner.cu (used by benchmark.sh)
+# Example: make POW_DEFINES="-DNONCES_PER_THREAD=128 -DNUM_STREAMS=4"
+POW_DEFINES =
+
 CXXFLAGS  = -DWITHGPU -march=native -Wno-write-strings -O2 -I$(SRCDIR) -I$(CUDA)/include \
             -DNOSTR_BLOCKS_PER_GRID=$(NOSTR_BLOCKS_PER_GRID) \
             -DNOSTR_THREADS_PER_BLOCK=$(NOSTR_THREADS_PER_BLOCK) \
@@ -52,6 +56,7 @@ $(OBJDIR)/GPU/GPURummage.o: $(SRCDIR)/GPU/GPURummage.cu
 
 $(OBJDIR)/GPU/CudaPowMiner.o: $(SRCDIR)/GPU/CudaPowMiner.cu
 	$(NVCC) -allow-unsupported-compiler --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -O2 -I$(SRCDIR) -I$(CUDA)/include \
+	$(POW_DEFINES) \
 	-gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/CudaPowMiner.o -c $(SRCDIR)/GPU/CudaPowMiner.cu
 
 $(OBJDIR)/GPU/rummage_ffi.o: $(SRCDIR)/GPU/rummage_ffi.cu

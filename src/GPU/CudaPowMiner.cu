@@ -48,18 +48,27 @@ inline void __powCudaSafeCall(cudaError err, const char *file, const int line) {
 // Compile-time tunables
 // ============================================================================
 
+#ifndef POW_THREADS_PER_BLOCK
 #define POW_THREADS_PER_BLOCK 256
+#endif
+
+#ifndef NONCES_PER_THREAD
 #define NONCES_PER_THREAD     256   // Baseline
+#endif
 
 // Toggle between variable-length and fixed-width ASCII nonce modes
 // Set USE_FIXED_WIDTH_NONCE to 1 for faster mining (no tail rebuilds, but nonce must fit in fixed width)
 // Set USE_FIXED_WIDTH_NONCE to 0 for variable-length nonce (slower due to tail rebuilds at 9->10 digits)
+#ifndef USE_FIXED_WIDTH_NONCE
 #define USE_FIXED_WIDTH_NONCE 0  // Set to 1 to enable fixed-width ASCII nonce mode (faster for low-difficulty, limited to 10-digit nonces)
+#endif
 
 // Use PTX SHA256 instructions (sm_75+ required, ~2-4x faster than software)
 // NOTE: PTX SHA256 intrinsics (sha256rnds2) are SASS-only, not available in PTX
 // Hardware acceleration requires compiler auto-vectorization or inline SASS
+#ifndef USE_PTX_SHA256
 #define USE_PTX_SHA256 0
+#endif
 
 #if USE_FIXED_WIDTH_NONCE
 #define FIXED_NONCE_WIDTH 10  // 10 digits = up to 9,999,999,999
@@ -73,7 +82,9 @@ inline void __powCudaSafeCall(cudaError err, const char *file, const int line) {
 #define MAX_TAIL_BYTES (MAX_PREFIX_REM + 20 + MAX_SUFFIX_LEN)
 
 // Number of CUDA streams for async dispatch
+#ifndef NUM_STREAMS
 #define NUM_STREAMS 2
+#endif
 
 // ============================================================================
 // Constant memory

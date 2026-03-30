@@ -87,16 +87,29 @@ fn main() {
         format!("-DKEYS_PER_THREAD_BATCH={}", keys_per_batch),
     ];
 
+    // --- Extra defines for CudaPowMiner.cu (e.g. benchmark tuning) ---
+    // POW_DEFINES env var: space-separated -D flags, e.g. "-DNONCES_PER_THREAD=128 -DNUM_STREAMS=4"
+    let pow_defines: Vec<String> = env::var("POW_DEFINES")
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if !pow_defines.is_empty() {
+        println!("cargo:warning=POW_DEFINES: {}", pow_defines.join(" "));
+    }
+    println!("cargo:rerun-if-env-changed=POW_DEFINES");
+
     // --- Compile .cu files with nvcc ---
     let cu_files = &[
-        ("GPU/GPURummage.cu", true),    // needs gpu_defines
-        ("GPU/CudaPowMiner.cu", false), // no gpu_defines needed
-        ("GPU/rummage_ffi.cu", true),   // needs gpu_defines (wraps GPURummage)
+        ("GPU/GPURummage.cu", true, false),   // needs gpu_defines
+        ("GPU/CudaPowMiner.cu", false, true), // needs pow_defines
+        ("GPU/rummage_ffi.cu", true, false),  // needs gpu_defines (wraps GPURummage)
     ];
 
     let mut obj_files: Vec<PathBuf> = Vec::new();
 
-    for (cu_file, needs_gpu_defines) in cu_files {
+    for (cu_file, needs_gpu_defines, needs_pow_defines) in cu_files {
         let src_path = src_dir.join(cu_file);
         let obj_name = cu_file.replace('/', "_").replace(".cu", ".o");
         let obj_path = out_dir.join(&obj_name);
@@ -116,6 +129,12 @@ fn main() {
 
         if *needs_gpu_defines {
             for d in &gpu_defines {
+                cmd.arg(d);
+            }
+        }
+
+        if *needs_pow_defines {
+            for d in &pow_defines {
                 cmd.arg(d);
             }
         }
