@@ -59,6 +59,11 @@
 
 mod pow;
 mod vanity;
+#[cfg(feature = "nostr-sdk")]
+mod nostr;
 
 pub use pow::{Error, PowMiner, PowResult};
 pub use vanity::{GTable, SearchMode, VanityMiner, VanityMode, VanityResult};
+
+#[cfg(feature = "nostr-sdk")]
+pub use nostr::{PowAdapterError, RummagePowAdapter};

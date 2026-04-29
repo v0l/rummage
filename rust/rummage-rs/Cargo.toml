@@ -7,5 +7,12 @@ repository.workspace = true
 description = "Safe Rust wrappers for the Rummage GPU Nostr mining library (CUDA)"
 readme = "README.md"
 
+[features]
+default = []
+nostr-sdk = ["dep:nostr-sdk", "dep:serde_json"]
+
 [dependencies]
 rummage-sys = { path = "../rummage-sys", version = "0.2.3" }
+
+nostr-sdk = { optional = true, git="https://github.com/rust-nostr/nostr", rev = "46d66396467e07c3dfb71e5102104ecb7e9c6b64", default-features = false }
+serde_json = { version = "1", optional = true }
