@@ -23,9 +23,15 @@ extern "C" {
 /** Opaque handle to a CudaPowMiner instance. */
 typedef struct RummagePow RummagePow;
 
+typedef enum {
+    RUMMAGE_POW_NOT_FOUND = 0,
+    RUMMAGE_POW_FOUND     = 1,
+    RUMMAGE_POW_ERROR     = -1,
+    RUMMAGE_POW_EXHAUSTED = -2
+} RummagePowStatus;
+
 /** Result of a PoW mining batch. */
 typedef struct {
-    int      found;          /* non-zero if a valid nonce was found       */
     uint64_t nonce;          /* the winning nonce value                   */
     uint8_t  event_id[32];   /* SHA256 event ID                          */
     int      difficulty;     /* actual leading zero bits achieved         */
@@ -40,23 +46,26 @@ RummagePow *rummage_pow_new(void);
 int rummage_pow_init(RummagePow *handle,
                      const char *prefix, size_t prefix_len,
                      const char *suffix, size_t suffix_len,
-                     int target_difficulty);
+                     int target_difficulty,
+                     int device);
 
-/** Run one batch of nonce mining on the GPU.
- *  Returns non-zero if a valid nonce was found (written to *result). */
-int rummage_pow_mine_batch(RummagePow *handle,
-                           uint64_t nonce_start,
-                           uint32_t batch_size,
-                           RummagePowResult *result);
+RummagePowStatus rummage_pow_mine(RummagePow *handle,
+                                  RummagePowResult *result,
+                                  uint64_t *attempts);
 
-/** Get the number of CUDA threads per launch (per stream). */
-uint32_t rummage_pow_thread_count(const RummagePow *handle);
+void rummage_pow_set_range(RummagePow *handle, uint64_t start_unit, uint64_t end_unit);
 
-/** Get the number of CUDA streams. */
-int rummage_pow_stream_count(const RummagePow *handle);
+uint64_t rummage_pow_cursor(const RummagePow *handle);
 
-/** Get the number of nonces each thread processes per launch. */
-int rummage_pow_nonces_per_thread(const RummagePow *handle);
+uint64_t rummage_pow_unit_count(const RummagePow *handle);
+
+uint64_t rummage_pow_nonces_per_unit(void);
+
+int rummage_pow_device_count(void);
+
+const char *rummage_pow_last_error(const RummagePow *handle);
+
+const char *rummage_pow_device_name(const RummagePow *handle);
 
 /** Release GPU resources (can be re-init'd afterwards). */
 void rummage_pow_cleanup(RummagePow *handle);

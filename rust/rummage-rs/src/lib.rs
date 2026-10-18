@@ -22,7 +22,7 @@
 //! miner.init(prefix, suffix, 21).expect("init failed");
 //!
 //! loop {
-//!     if let Some(result) = miner.mine() {
+//!     if let Some(result) = miner.mine().expect("GPU error") {
 //!         println!("Found nonce {} with {} bits", result.nonce, result.difficulty);
 //!         break;
 //!     }
@@ -66,4 +66,4 @@ pub use pow::{Error, PowMiner, PowResult};
 pub use vanity::{GTable, SearchMode, VanityMiner, VanityMode, VanityResult};
 
 #[cfg(feature = "nostr-sdk")]
-pub use nostr::{PowAdapterError, RummagePowAdapter};
+pub use nostr::{PowAdapterError, RummagePowAdapter, pow_template};

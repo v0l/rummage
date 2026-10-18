@@ -30,9 +30,12 @@
 #include <signal.h>
 #include <sstream>
 #include <fstream>
+#include <algorithm>
+#include <tuple>
 #include "GPU/GPURummage.h"
 #include "GPU/CudaPowMiner.h"
 #include "GPU/NostrUtils.h"
+#include "PowEvent.h"
 #include "CPU/SECP256k1.h"
 
 // SHA256 implementation for event ID computation
@@ -84,45 +87,6 @@ int countLeadingZeroBits(const uint8_t *hash, size_t len) {
         break;
     }
     return total;
-}
-
-// Extract field value from simple JSON (basic parser)
-std::string extractJsonField(const std::string &json, const std::string &field) {
-    std::string searchKey = "\"" + field + "\"";
-    size_t pos = json.find(searchKey);
-    if (pos == std::string::npos) return "";
-    
-    pos = json.find(':', pos);
-    if (pos == std::string::npos) return "";
-    
-    pos = json.find_first_not_of(" \t\n\r", pos + 1);
-    if (pos == std::string::npos) return "";
-    
-    if (json[pos] == '"') {
-        size_t start = pos + 1;
-        size_t end = json.find('"', start);
-        if (end == std::string::npos) return "";
-        return json.substr(start, end - start);
-    }
-    
-    // For numeric values
-    size_t start = pos;
-    size_t end = json.find_first_of(",}", pos);
-    if (end == std::string::npos) return "";
-    
-    std::string value = json.substr(start, end - start);
-    value.erase(0, value.find_first_not_of(" \t\n\r"));
-    return value;
-}
-
-// Build event ID string for hashing (NIP-01 format)
-std::string buildEventIdString(const std::string &pubkey, uint32_t createdAt, 
-                                int kind, const std::string &tags, 
-                                const std::string &content) {
-    std::ostringstream oss;
-    oss << "[0,\"" << pubkey << "\"," << createdAt << "," << kind 
-        << "," << tags << ",\"" << content << "\"]";
-    return oss.str();
 }
 
 // Load unsigned event from file
@@ -371,8 +335,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--pow-difficulty") == 0) {
             if (i + 1 < argc) {
                 powDifficulty = atoi(argv[++i]);
-                if (powDifficulty < 1 || powDifficulty > 64) {
-                    printf("Error: --pow-difficulty must be between 1 and 64\n");
+                if (powDifficulty < 1 || powDifficulty > 256) {
+                    printf("Error: --pow-difficulty must be between 1 and 256\n");
                     return 1;
                 }
             } else {
@@ -404,188 +368,124 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        // Parse event fields
-        std::string pubkey = extractJsonField(eventJson, "pubkey");
-        std::string createdAtStr = extractJsonField(eventJson, "created_at");
-        std::string kindStr = extractJsonField(eventJson, "kind");
-        std::string content = extractJsonField(eventJson, "content");
-
-        if (pubkey.empty() || createdAtStr.empty() || kindStr.empty()) {
-            fprintf(stderr, "Error: Event JSON must contain pubkey, created_at, and kind fields\n");
+        PowEvent event;
+        std::string parseError;
+        if (!parsePowEvent(eventJson, event, parseError)) {
+            fprintf(stderr, "Error: Invalid event JSON: %s\n", parseError.c_str());
             return 1;
         }
+        uint64_t createdAt = event.createdAt;
 
-        uint32_t createdAt = (uint32_t)strtoul(createdAtStr.c_str(), NULL, 10);
-        int kind = atoi(kindStr.c_str());
-
-        // Extract existing tags array from the event JSON
-        std::string existingTags;
-        size_t tagsPos = eventJson.find("\"tags\"");
-        if (tagsPos != std::string::npos) {
-            size_t arrStart = eventJson.find('[', tagsPos + 5);
-            if (arrStart != std::string::npos) {
-                // Find matching closing bracket
-                int depth = 1;
-                size_t pos = arrStart + 1;
-                while (pos < eventJson.size() && depth > 0) {
-                    if (eventJson[pos] == '[') depth++;
-                    else if (eventJson[pos] == ']') depth--;
-                    pos++;
-                }
-                existingTags = eventJson.substr(arrStart + 1, pos - arrStart - 2);
-            }
-        }
-
-        // Build the NIP-01 serialization template with nonce tag placeholder
-        // Format: [0,"<pubkey>",<created_at>,<kind>,<tags>,"<content>"]
-        // The nonce tag: ["nonce","<NONCE>","<target>"]
-        //
-        // We split the template at the nonce value position:
-        //   prefix = [0,"<pubkey>",<ts>,<kind>,[...tags...,["nonce","
-        //   suffix = ","<target>"]...],"<content>"]
-
-        // Helper to build prefix/suffix for a given timestamp
-        auto buildTemplate = [&](uint32_t ts) -> std::pair<std::string, std::string> {
-            std::ostringstream pss, sss;
-            pss << "[0,\"" << pubkey << "\"," << ts << "," << kind << ",[";
-            if (!existingTags.empty()) {
-                pss << existingTags << ",";
-            }
-            pss << "[\"nonce\",\"";
-            sss << "\",\"" << powDifficulty << "\"]],\"" << content << "\"]";
-            return {pss.str(), sss.str()};
+        auto nonceTags = [&](const std::string &nonce) {
+            auto tags = event.tags;
+            tags.push_back({"nonce", nonce, std::to_string(powDifficulty)});
+            return tags;
+        };
+        auto buildTemplate = [&](uint64_t ts) -> std::pair<std::string, std::string> {
+            std::string full = serializeEvent(event.pubkey, ts, event.kind, nonceTags("0"), event.content);
+            std::string suffix = "\",\"" + std::to_string(powDifficulty) + "\"]]," + jsonString(event.content) + "]";
+            return {full.substr(0, full.size() - suffix.size() - 1), suffix};
         };
 
         auto [prefix, suffix] = buildTemplate(createdAt);
 
         printf("\nPoW Mining Configuration:\n");
-        printf("  Pubkey:     %s\n", pubkey.c_str());
-        printf("  Created at: %u\n", createdAt);
-        printf("  Kind:       %d\n", kind);
+        printf("  Pubkey:     %s\n", event.pubkey.c_str());
+        printf("  Created at: %llu\n", (unsigned long long)createdAt);
+        printf("  Kind:       %llu\n", (unsigned long long)event.kind);
         printf("  Difficulty: %d leading zero bits\n", powDifficulty);
         printf("  Template:   %zu prefix + nonce + %zu suffix bytes\n",
                prefix.size(), suffix.size());
-
-        // Verify with a CPU check first (nonce = 0)
-        std::string testMsg = prefix + "0" + suffix;
-        uint8_t testHash[SHA256_DIGEST_LENGTH];
-        SHA256((const uint8_t *)testMsg.c_str(), testMsg.size(), testHash);
-        printf("  Verify ID:  %s (nonce=0, %d bits)\n",
-               bytesToHex(testHash, SHA256_DIGEST_LENGTH).c_str(),
-               countLeadingZeroBits(testHash, SHA256_DIGEST_LENGTH));
         printf("\n");
 
-        // Initialize GPU miner
         CudaPowMiner miner;
         if (!miner.init(prefix, suffix, powDifficulty)) {
-            fprintf(stderr, "Error: Failed to initialize GPU PoW miner\n");
+            fprintf(stderr, "Error: Failed to initialize GPU PoW miner: %s\n", miner.lastError().c_str());
             return 1;
         }
+        printf("PoW Miner GPU: %s\n", miner.deviceName().c_str());
 
-        uint32_t batchSize = miner.getThreadCount();
-        int numStreams = miner.getStreamCount();
-        int noncesPerThread = miner.getNoncesPerThread();
-        // Total nonces per mineBatch call = threads * nonces/thread * streams
-        uint64_t noncesPerBatch = (uint64_t)batchSize * noncesPerThread * numStreams;
-        uint64_t nonceStart = 0;
         uint64_t totalAttempts = 0;
         PowResult result;
 
-        // Timestamp refresh interval (seconds) — keeps created_at current
-        // during long mining sessions and gives a fresh nonce search space
         const int timestampRefreshSecs = 30;
-        auto lastTimestampRefresh = std::chrono::system_clock::now();
-
-        auto startTime = std::chrono::system_clock::now();
+        auto lastTimestampRefresh = std::chrono::steady_clock::now();
+        auto startTime = std::chrono::steady_clock::now();
         auto lastReport = startTime;
 
         printf("Mining started! Press Ctrl+C to stop.\n");
         printf("  (created_at will refresh every %d seconds)\n\n", timestampRefreshSecs);
 
         while (keepRunning) {
-            bool found = miner.mineBatch(nonceStart, batchSize, result);
-            totalAttempts += noncesPerBatch;
-            nonceStart += noncesPerBatch;
+            uint64_t attempts = 0;
+            PowStatus status = miner.mine(result, attempts);
+            totalAttempts += attempts;
+            if (status == POW_ERROR) {
+                fprintf(stderr, "Error: GPU PoW mining failed: %s\n", miner.lastError().c_str());
+                return 1;
+            }
 
-            if (found) {
-                auto endTime = std::chrono::system_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+            if (status == POW_FOUND) {
+                double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count();
 
                 printf("\n========== PoW FOUND ==========\n");
-                printf("Nonce:      %lu\n", result.nonce);
+                printf("Nonce:      %llu\n", (unsigned long long)result.nonce);
                 printf("Event ID:   %s\n", bytesToHex(result.eventId, 32).c_str());
                 printf("Difficulty: %d bits\n", result.difficulty);
-                printf("Timestamp:  %u\n", createdAt);
-                printf("Attempts:   %lu\n", totalAttempts);
-                printf("Time:       %.2f seconds\n", elapsed / 1000.0);
+                printf("Timestamp:  %llu\n", (unsigned long long)createdAt);
+                printf("Attempts:   %llu\n", (unsigned long long)totalAttempts);
+                printf("Time:       %.2f seconds\n", elapsed);
                 if (elapsed > 0) {
-                    printf("Rate:       %.2f MH/s\n", totalAttempts / (elapsed / 1000.0) / 1e6);
+                    printf("Rate:       %.2f MH/s\n", totalAttempts / elapsed / 1e6);
                 }
 
-                // Verify on CPU
-                char nonceBuf[21];
-                snprintf(nonceBuf, sizeof(nonceBuf), "%lu", result.nonce);
-                std::string fullMsg = prefix + nonceBuf + suffix;
+                auto tags = nonceTags(std::to_string(result.nonce));
+                std::string fullMsg = serializeEvent(event.pubkey, createdAt, event.kind, tags, event.content);
                 uint8_t cpuHash[SHA256_DIGEST_LENGTH];
                 SHA256((const uint8_t *)fullMsg.c_str(), fullMsg.size(), cpuHash);
                 int cpuBits = countLeadingZeroBits(cpuHash, SHA256_DIGEST_LENGTH);
+                bool ok = memcmp(cpuHash, result.eventId, 32) == 0 && cpuBits >= powDifficulty;
 
                 printf("CPU verify: %s (%d bits) %s\n",
-                       bytesToHex(cpuHash, SHA256_DIGEST_LENGTH).c_str(),
-                       cpuBits,
-                       (cpuBits >= powDifficulty) ? "OK" : "MISMATCH!");
+                       bytesToHex(cpuHash, SHA256_DIGEST_LENGTH).c_str(), cpuBits, ok ? "OK" : "MISMATCH!");
+                if (!ok) {
+                    fprintf(stderr, "Error: CPU verification failed, not printing the nonce\n");
+                    return 1;
+                }
 
-                // Print the nonce tag to add to the event
                 printf("\nAdd this to your event:\n");
-                printf("  \"created_at\": %u\n", createdAt);
-                printf("  [\"nonce\",\"%lu\",\"%d\"]\n", result.nonce, powDifficulty);
+                printf("  \"created_at\": %llu\n", (unsigned long long)createdAt);
+                printf("  \"tags\": %s\n", serializeTags(tags).c_str());
                 printf("================================\n");
-
-                miner.cleanup();
                 return 0;
             }
 
-            // Check if we should refresh the timestamp
-            auto now = std::chrono::system_clock::now();
-            auto sinceTsRefresh = std::chrono::duration_cast<std::chrono::seconds>(
-                now - lastTimestampRefresh).count();
-            if (sinceTsRefresh >= timestampRefreshSecs) {
-                uint32_t newTs = (uint32_t)std::chrono::duration_cast<std::chrono::seconds>(
-                    now.time_since_epoch()).count();
-                if (newTs != createdAt) {
-                    createdAt = newTs;
-                    miner.cleanup();
-
-                    auto [newPrefix, newSuffix] = buildTemplate(createdAt);
-                    prefix = newPrefix;
-                    suffix = newSuffix;
-
-                    if (!miner.init(prefix, suffix, powDifficulty)) {
-                        fprintf(stderr, "Error: Failed to reinitialize GPU PoW miner\n");
-                        return 1;
-                    }
-                    // Reset nonce — fresh timestamp = fresh search space
-                    nonceStart = 0;
-                    printf("PoW: refreshed created_at to %u, reset nonce\n", createdAt);
-                    fflush(stdout);
+            auto now = std::chrono::steady_clock::now();
+            if (status == POW_EXHAUSTED || now - lastTimestampRefresh >= std::chrono::seconds(timestampRefreshSecs)) {
+                uint64_t wallNow = (uint64_t)std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                createdAt = std::max(wallNow, createdAt + 1);
+                std::tie(prefix, suffix) = buildTemplate(createdAt);
+                if (!miner.init(prefix, suffix, powDifficulty)) {
+                    fprintf(stderr, "Error: Failed to reinitialize GPU PoW miner: %s\n", miner.lastError().c_str());
+                    return 1;
                 }
+                printf("PoW: refreshed created_at to %llu, reset nonce\n", (unsigned long long)createdAt);
+                fflush(stdout);
                 lastTimestampRefresh = now;
             }
 
-            // Progress report every 5 seconds
-            auto sinceReport = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count();
-            if (sinceReport > 5000) {
-                auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count();
-                double rate = (totalMs > 0) ? (totalAttempts / (totalMs / 1000.0)) : 0;
-                printf("PoW: %lu attempts, %.2f MH/s, nonce range [%lu..%lu)\n",
-                       totalAttempts, rate / 1e6, nonceStart - noncesPerBatch, nonceStart);
+            if (now - lastReport > std::chrono::seconds(5)) {
+                double secs = std::chrono::duration<double>(now - startTime).count();
+                double rate = secs > 0 ? totalAttempts / secs : 0;
+                printf("PoW: %llu attempts, %.2f MH/s\n", (unsigned long long)totalAttempts, rate / 1e6);
                 fflush(stdout);
                 lastReport = now;
             }
         }
 
-        printf("\nPoW mining stopped. No solution found after %lu attempts.\n", totalAttempts);
-        miner.cleanup();
+        printf("\nPoW mining stopped. No solution found after %llu attempts.\n",
+               (unsigned long long)totalAttempts);
         return 0;
     }
 

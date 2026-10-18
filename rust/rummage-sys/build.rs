@@ -88,7 +88,7 @@ fn main() {
     ];
 
     // --- Extra defines for CudaPowMiner.cu (e.g. benchmark tuning) ---
-    // POW_DEFINES env var: space-separated -D flags, e.g. "-DNONCES_PER_THREAD=128 -DNUM_STREAMS=4"
+    // POW_DEFINES env var: space-separated -D flags, e.g. "-DPOW_THREADS_PER_BLOCK=128 -DPOW_LAUNCH_WAVES=4"
     let pow_defines: Vec<String> = env::var("POW_DEFINES")
         .unwrap_or_default()
         .split_whitespace()

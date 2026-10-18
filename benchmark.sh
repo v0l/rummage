@@ -37,7 +37,7 @@ SPECIFIC_VARIANT=""
 # Test event (same as PERFORMANCE.md)
 TEST_EVENT='{"id":"","pubkey":"79c2cae114ea28a681e1ba5ebc76007ed87f86694f35f782483f4e4c2d45b96f","created_at":1234567890,"kind":1,"tags":[["e","abc123"],["p","def456"]],"content":"hello world","sig":""}'
 
-# Long suffix event (triggers constant tail block W schedules)
+# Long suffix event (several constant tail blocks after the nonce)
 LONG_EVENT='{"id":"","pubkey":"79c2cae114ea28a681e1ba5ebc76007ed87f86694f35f782483f4e4c2d45b96f","created_at":1234567890,"kind":1,"tags":[["e","abc123"],["p","def456"],["t","benchmark"],["t","performance"]],"content":"This is a longer content string designed to produce a large suffix that triggers constant tail block W schedule pre-computation for benchmarking purposes.","sig":""}'
 
 # ---- Parse arguments ----
@@ -57,17 +57,11 @@ while [[ $# -gt 0 ]]; do
         --list)
             cat <<'EOF'
 Available variants:
-  baseline              Default (NONCES=256, variable nonce, TPB=256, 2 streams)
-  nonces_128            NONCES_PER_THREAD=128
-  nonces_512            NONCES_PER_THREAD=512
-  fixed_nonce           USE_FIXED_WIDTH_NONCE=1
+  baseline              Default (TPB=256, 1 wave per launch)
   tpb_128               POW_THREADS_PER_BLOCK=128
   tpb_512               POW_THREADS_PER_BLOCK=512
-  streams_1             NUM_STREAMS=1
-  streams_4             NUM_STREAMS=4
-  nonces128_fixed       NONCES=128 + fixed-width nonce
-  minimal               NONCES=128, 1 stream
-  maximal               NONCES=512, 4 streams, TPB=512
+  waves_4               POW_LAUNCH_WAVES=4
+  tpb_128_waves_4       POW_THREADS_PER_BLOCK=128 POW_LAUNCH_WAVES=4
 
 Each variant is tested with standard, --fast, and long-suffix events.
 EOF
@@ -84,24 +78,17 @@ done
 
 declare -a VARIANTS=(
     "baseline|"
-    "nonces_128|-DNONCES_PER_THREAD=128"
-    "nonces_512|-DNONCES_PER_THREAD=512"
-    "fixed_nonce|-DUSE_FIXED_WIDTH_NONCE=1"
     "tpb_128|-DPOW_THREADS_PER_BLOCK=128"
     "tpb_512|-DPOW_THREADS_PER_BLOCK=512"
-    "streams_1|-DNUM_STREAMS=1"
-    "streams_4|-DNUM_STREAMS=4"
-    "nonces128_fixed|-DNONCES_PER_THREAD=128 -DUSE_FIXED_WIDTH_NONCE=1"
-    "minimal|-DNONCES_PER_THREAD=128 -DNUM_STREAMS=1"
-    "maximal|-DNONCES_PER_THREAD=512 -DPOW_THREADS_PER_BLOCK=512 -DNUM_STREAMS=4"
+    "waves_4|-DPOW_LAUNCH_WAVES=4"
+    "tpb_128_waves_4|-DPOW_THREADS_PER_BLOCK=128 -DPOW_LAUNCH_WAVES=4"
 )
 
 if [[ "$QUICK_MODE" == "1" ]]; then
     VARIANTS=(
         "baseline|"
-        "fixed_nonce|-DUSE_FIXED_WIDTH_NONCE=1"
-        "nonces_128|-DNONCES_PER_THREAD=128"
-        "streams_4|-DNUM_STREAMS=4"
+        "tpb_128|-DPOW_THREADS_PER_BLOCK=128"
+        "waves_4|-DPOW_LAUNCH_WAVES=4"
     )
     DIFFICULTIES=(32 36)
 fi
@@ -220,10 +207,10 @@ declare -a ALL_RESULTS=()
 # Event configurations: name, json, label, extra CLI flags
 # "standard" = normal nonce-in-tag mode
 # "fast"     = --fast mode (nonce appended to content, ~2B suffix)
-# "long"     = long suffix (triggers constant tail block W schedules)
+# "long"     = long suffix (several constant tail blocks after the nonce)
 EVENT_TYPES=("standard" "fast" "long")
 EVENT_JSONS=("$TEST_EVENT" "$TEST_EVENT" "$LONG_EVENT")
-EVENT_LABELS=("standard (nonce tag)" "fast (nonce in content)" "long (const tail blocks)")
+EVENT_LABELS=("standard (nonce tag)" "fast (nonce in content)" "long (multi-block suffix)")
 EVENT_FLAGS=("" "--fast" "")
 
 if [[ "$QUICK_MODE" == "1" ]]; then
@@ -326,7 +313,7 @@ print_table() {
 
 print_table "standard" "Standard mode (nonce in tag):"
 print_table "fast" "Fast mode (nonce in content, --fast):"
-print_table "long" "Long suffix (constant tail blocks):"
+print_table "long" "Long suffix (multi-block):"
 
 # Relative performance vs baseline
 log "Relative to baseline (standard event):"

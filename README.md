@@ -60,22 +60,13 @@ Mine PoW from an inline JSON string:
 ./rummage --pow-event '{"pubkey":"<hex>","created_at":1735000000,"kind":1,"tags":[],"content":"hello"}' --pow-difficulty 24
 ```
 
-The event JSON must contain `pubkey`, `created_at`, `kind`, `content`, and optionally `tags`. On success, Rummage prints the nonce tag to add to your event.
+The event JSON must contain `pubkey`, `created_at`, `kind`, `content`, and optionally `tags`. Any existing `nonce` tag is replaced. On success, Rummage prints the `created_at` and full `tags` array to put in your event.
 
 #### How content length affects PoW hashrate
 
 The GPU computes SHA-256 over the [NIP-01 canonical event serialization](https://github.com/nostr-protocol/nips/blob/master/01.md), which includes the `content` field verbatim. The host pre-computes a SHA-256 midstate over the fixed prefix (everything before the nonce), so the GPU only processes the **tail**: the prefix remainder + nonce digits + suffix (which contains the content). Longer content means more SHA-256 block transforms per nonce attempt, which directly reduces hashrate.
 
-Each SHA-256 block is 64 bytes. The number of GPU transforms per nonce is `ceil((tailLen + 9) / 64)`, where the `+9` accounts for SHA-256 padding. Performance scales roughly as `1 / transforms` — doubling the transform count approximately halves the hashrate.
-
-The table below shows approximate content length thresholds for a typical kind-1 event with no extra tags and a 2-digit difficulty target. These thresholds shift by a few bytes depending on nonce length (which grows as mining progresses), number of existing tags, kind digits, and difficulty digits.
-
-| Content length | GPU transforms / nonce | Relative hashrate |
-|---|---|---|
-| 0–3 chars | 1 | **1.0x** (baseline) |
-| 4–67 chars | 2 | ~0.5x |
-| 68–131 chars | 3 | ~0.33x |
-| 132–195 chars | 4 | ~0.25x |
+Each SHA-256 block is 64 bytes. Every block after the one holding the nonce adds a full 64-round transform per attempt, so hashrate falls roughly in proportion to the number of blocks the content pushes past the nonce. On an RTX PRO 6000, a kind-1 note with no tags mines at about 11,300 MH/s with 11 characters of content, 4,900 MH/s with 213 characters and 1,500 MH/s with 1,000 characters.
 
 > **Tip:** Use `--fast` mode to eliminate the content length penalty entirely. Without `--fast`, keep your content short — a "gm" post mines roughly 2x faster than a 100-character message.
 
@@ -100,12 +91,13 @@ By default, random search mode is used (faster for short patterns).
 **PoW Mining (NIP-13)**:
 - `--pow-event <json>` - Mine PoW for an unsigned event (inline JSON)
 - `--pow-file <file>` - Mine PoW for an unsigned event (from file)
-- `--pow-difficulty <n>` - Target difficulty in leading zero bits (default: 20)
+- `--pow-difficulty <n>` - Target difficulty in leading zero bits, 1-256 (default: 20)
 
 **PoW Mining (Rust CLI)**:
 - `pow --event <json>` - Mine PoW for an unsigned event (inline JSON)
 - `pow --file <file>` - Mine PoW for an unsigned event (from file)
-- `pow --difficulty <n>` - Target difficulty in leading zero bits (default: 20)
+- `pow --difficulty <n>` - Target difficulty in leading zero bits, 1-256 (default: 20)
+- `pow --device <n>` - CUDA device index (default: 0)
 - `pow --nsec <key>` - Secret key (nsec or hex) to sign the mined event
 - `pow --relay <url>` - Relay URL to publish to (repeatable, requires `--nsec`)
 - `pow --fast` - Append nonce to content for single-block GPU hashing
@@ -176,14 +168,14 @@ By default, the GPU varies the nonce inside the `["nonce","<NONCE>","<diff>"]` t
 
 The `--fast` flag reverses this: it fixes the nonce tag to `["nonce","0","<diff>"]` and appends the varying nonce to the **end** of the content field (separated by a newline). Since content is the last field in the serialization, the nonce digits now appear right before the closing `"]`, giving a 2-byte suffix. The GPU only needs to hash one SHA-256 block regardless of content length — everything before the nonce is absorbed into the midstate.
 
-| Mode | Content length | Suffix bytes | GPU transforms | Hashrate (RTX PRO 6000) |
-|---|---|---|---|---|
-| Standard | 11 chars | ~40 | 1-2 | ~8,000 MH/s |
-| Standard | 213 chars | ~240 | 5 | ~3,900 MH/s |
-| **Fast** | 11 chars | 2 | 1 | **~13,500 MH/s** |
-| **Fast** | 213 chars | 2 | 1 | **~15,600 MH/s** |
+| Mode | Content length | Hashrate (RTX PRO 6000) |
+|---|---|---|
+| Standard | 11 chars | ~11,300 MH/s |
+| Standard | 213 chars | ~4,900 MH/s |
+| **Fast** | 11 chars | **~17,700 MH/s** |
+| **Fast** | 213 chars | **~18,600 MH/s** |
 
-The resulting event content will look like `"hello world\n858074061"` — clients render the nonce on its own line below the note text.
+The resulting event content will look like `"hello world\n1000000000858074061"` — clients render the nonce on its own line below the note text.
 
 > **Note:** The mined event is fully valid NIP-13 — the nonce tag is present with the target difficulty, and the event ID has the required leading zero bits. Use `--nsec` to sign and optionally `--relay` to publish directly.
 
@@ -220,14 +212,16 @@ let suffix_fast = "\"]".to_string();
 
 // Both use the same PowMiner API
 let mut miner = PowMiner::new().unwrap();
-miner.init(&prefix_fast, &suffix_fast, difficulty as i32).unwrap();
+miner.init(&prefix_fast, &suffix_fast, difficulty).unwrap();
 
-while let None = miner.mine() {
-    // mining...
-}
+let result = loop {
+    if let Some(result) = miner.mine().unwrap() {
+        break result;
+    }
+};
 ```
 
-The key insight: in fast mode, the suffix is always 2 bytes (`"\"]`) regardless of content length, so the GPU processes a single SHA-256 block per nonce. In standard mode, the suffix grows with content length, requiring more block transforms.
+In fast mode the suffix is always 2 bytes (`"]`) regardless of content length, so the GPU hashes a single SHA-256 block per nonce. In standard mode the suffix grows with content length, requiring more block transforms. Build the strings with a JSON serialiser (as `rummage_rs::pow_template` does for `nostr-sdk` events) so the content is escaped exactly as NIP-01 requires.
 
 ## What is Nostr?
 Perhaps you stumbled upon this project and have no idea what on earth is going on here. 

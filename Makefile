@@ -3,6 +3,7 @@
 SRCDIR = src
 
 SRC = $(SRCDIR)/rummage.cpp \
+      $(SRCDIR)/PowEvent.cpp \
       $(SRCDIR)/CPU/Point.cpp \
       $(SRCDIR)/CPU/Int.cpp \
       $(SRCDIR)/CPU/IntMod.cpp \
@@ -18,6 +19,7 @@ OBJET = $(addprefix $(OBJDIR)/, \
 		CPU/Int.o \
 		CPU/IntMod.o \
 		CPU/SECP256K1.o \
+        PowEvent.o \
         rummage.o \
 )
 
@@ -33,7 +35,7 @@ NOSTR_THREADS_PER_BLOCK = 256
 KEYS_PER_THREAD_BATCH   = 256
 
 # Extra defines for CudaPowMiner.cu (used by benchmark.sh)
-# Example: make POW_DEFINES="-DNONCES_PER_THREAD=128 -DNUM_STREAMS=4"
+# Example: make POW_DEFINES="-DPOW_THREADS_PER_BLOCK=128 -DPOW_LAUNCH_WAVES=4"
 POW_DEFINES =
 
 CXXFLAGS  = -DWITHGPU -march=native -Wno-write-strings -O2 -I$(SRCDIR) -I$(CUDA)/include \

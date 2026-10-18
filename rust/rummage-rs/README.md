@@ -6,7 +6,8 @@ Rummage is a high-performance CUDA-accelerated tool for Nostr vanity key mining 
 
 ## Features
 
-- **`PowMiner`** — NIP-13 Proof of Work mining for Nostr events (8,000+ MH/s on RTX PRO 6000)
+- **`PowMiner`** — NIP-13 Proof of Work mining for Nostr events (19,000+ MH/s on RTX PRO 6000)
+- **`RummagePowAdapter`**: `nostr-sdk` `PowAdapter` (feature `nostr-sdk`)
 - **`VanityMiner`** — Vanity npub/hex key generation (240M+ keys/sec on RTX PRO 6000)
 - **`GTable`** — Pre-computed secp256k1 generator table for vanity mining
 
@@ -22,7 +23,7 @@ let mut miner = PowMiner::new().expect("GPU init");
 miner.init(prefix, suffix, 21).expect("init failed");
 
 loop {
-    if let Some(result) = miner.mine() {
+    if let Some(result) = miner.mine().expect("GPU error") {
         println!("Found nonce {} with {} bits", result.nonce, result.difficulty);
         break;
     }

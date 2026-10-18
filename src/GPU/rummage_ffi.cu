@@ -30,39 +30,67 @@ RummagePow *rummage_pow_new(void) {
 int rummage_pow_init(RummagePow *h,
                      const char *prefix, size_t prefix_len,
                      const char *suffix, size_t suffix_len,
-                     int target_difficulty)
+                     int target_difficulty,
+                     int device)
 {
-    if (!h) return 0;
-    std::string p(prefix, prefix_len);
-    std::string s(suffix, suffix_len);
-    return h->inner.init(p, s, target_difficulty) ? 1 : 0;
+    if (!h || (!prefix && prefix_len) || (!suffix && suffix_len)) return 0;
+    try {
+        std::string p(prefix ? prefix : "", prefix_len);
+        std::string s(suffix ? suffix : "", suffix_len);
+        return h->inner.init(p, s, target_difficulty, device) ? 1 : 0;
+    } catch (...) {
+        h->inner.cleanup();
+        return 0;
+    }
 }
 
-int rummage_pow_mine_batch(RummagePow *h,
-                           uint64_t nonce_start,
-                           uint32_t batch_size,
-                           RummagePowResult *result)
+RummagePowStatus rummage_pow_mine(RummagePow *h, RummagePowResult *result, uint64_t *attempts)
 {
-    if (!h || !result) return 0;
+    if (attempts) *attempts = 0;
+    if (!h || !result) return RUMMAGE_POW_ERROR;
     PowResult pr;
-    bool found = h->inner.mineBatch(nonce_start, batch_size, pr);
-    result->found      = found ? 1 : 0;
-    result->nonce      = pr.nonce;
-    result->difficulty  = pr.difficulty;
-    memcpy(result->event_id, pr.eventId, 32);
-    return found ? 1 : 0;
+    uint64_t n = 0;
+    PowStatus status;
+    try {
+        status = h->inner.mine(pr, n);
+    } catch (...) {
+        return RUMMAGE_POW_ERROR;
+    }
+    if (attempts) *attempts = n;
+    if (status == POW_FOUND) {
+        result->nonce = pr.nonce;
+        result->difficulty = pr.difficulty;
+        memcpy(result->event_id, pr.eventId, 32);
+    }
+    return (RummagePowStatus)status;
 }
 
-uint32_t rummage_pow_thread_count(const RummagePow *h) {
-    return h ? h->inner.getThreadCount() : 0;
+void rummage_pow_set_range(RummagePow *h, uint64_t start_unit, uint64_t end_unit) {
+    if (h) h->inner.setRange(start_unit, end_unit);
 }
 
-int rummage_pow_stream_count(const RummagePow *h) {
-    return h ? h->inner.getStreamCount() : 0;
+uint64_t rummage_pow_cursor(const RummagePow *h) {
+    return h ? h->inner.cursor() : 0;
 }
 
-int rummage_pow_nonces_per_thread(const RummagePow *h) {
-    return h ? h->inner.getNoncesPerThread() : 0;
+uint64_t rummage_pow_unit_count(const RummagePow *h) {
+    return h ? h->inner.unitCount() : 0;
+}
+
+uint64_t rummage_pow_nonces_per_unit(void) {
+    return CudaPowMiner::noncesPerUnit();
+}
+
+int rummage_pow_device_count(void) {
+    return CudaPowMiner::deviceCount();
+}
+
+const char *rummage_pow_last_error(const RummagePow *h) {
+    return h ? h->inner.lastError().c_str() : "null miner handle";
+}
+
+const char *rummage_pow_device_name(const RummagePow *h) {
+    return h ? h->inner.deviceName().c_str() : "";
 }
 
 void rummage_pow_cleanup(RummagePow *h) {
@@ -70,10 +98,7 @@ void rummage_pow_cleanup(RummagePow *h) {
 }
 
 void rummage_pow_destroy(RummagePow *h) {
-    if (h) {
-        h->inner.cleanup();
-        delete h;
-    }
+    delete h;
 }
 
 /* ===================================================================

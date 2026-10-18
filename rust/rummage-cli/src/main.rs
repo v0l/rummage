@@ -89,8 +89,12 @@ struct PowArgs {
     file: Option<PathBuf>,
 
     /// Target difficulty in leading zero bits
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=64))]
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=256))]
     difficulty: u32,
+
+    /// CUDA device index
+    #[arg(long, default_value_t = 0)]
+    device: u32,
 
     /// Secret key (nsec or hex) to sign and optionally publish the event
     #[arg(long)]
@@ -108,14 +112,6 @@ struct PowArgs {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Escape a string for embedding inside a JSON double-quoted string.
-/// Uses serde_json for RFC 8259 compliant escaping, then strips the outer quotes.
-fn json_escape(s: &str) -> String {
-    let quoted = serde_json::to_string(s).expect("string serialization cannot fail");
-    // serde_json::to_string wraps in quotes: "\"escaped\"" → strip them
-    quoted[1..quoted.len() - 1].to_string()
-}
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
     hex::encode(bytes)
@@ -179,72 +175,69 @@ fn bech32_to_hex(bech32_pattern: &str) -> String {
     hex_pattern
 }
 
-/// Extract the inner content of "tags": [...] from the raw JSON string,
-/// returning only what is between the outer brackets (exclusive).
-/// Correctly handles brackets inside JSON string values.
-fn extract_tags_inner(json: &str) -> Option<String> {
-    let tags_pos = json.find("\"tags\"")?;
-    let after_key = &json[tags_pos + 6..];
-    let arr_start = after_key.find('[')? + 1;
-    let slice = &after_key[arr_start..];
-
-    let mut depth = 1i32;
-    let mut in_string = false;
-    let mut escape_next = false;
-
-    for (i, ch) in slice.char_indices() {
-        if escape_next {
-            escape_next = false;
-            continue;
+fn parse_tags(event: &serde_json::Value) -> anyhow::Result<Vec<Vec<String>>> {
+    let Some(tags) = event.get("tags") else {
+        return Ok(Vec::new());
+    };
+    let tags = tags
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("tags must be an array"))?;
+    let mut out = Vec::with_capacity(tags.len());
+    for tag in tags {
+        let values = tag
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("every tag must be an array, got {tag}"))?;
+        if values.is_empty() {
+            anyhow::bail!("empty tag in tags");
         }
-        if ch == '\\' && in_string {
-            escape_next = true;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            continue;
-        }
-        if in_string {
-            continue;
-        }
-        match ch {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    let inner = slice[..i].trim();
-                    return if inner.is_empty() {
-                        None
-                    } else {
-                        Some(inner.to_string())
-                    };
-                }
-            }
-            _ => {}
+        let values = values
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("tag values must be strings, got {v} in {tag}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if values[0] != "nonce" {
+            out.push(values);
         }
     }
-    None
+    Ok(out)
+}
+
+fn serialize_event(
+    pubkey: &str,
+    created_at: u64,
+    kind: u16,
+    tags: &[Vec<String>],
+    content: &str,
+) -> String {
+    serde_json::json!([0, pubkey, created_at, kind, tags, content]).to_string()
+}
+
+fn with_nonce_tag(tags: &[Vec<String>], nonce: &str, difficulty: u32) -> Vec<Vec<String>> {
+    let mut tags = tags.to_vec();
+    tags.push(vec!["nonce".to_string(), nonce.to_string(), difficulty.to_string()]);
+    tags
 }
 
 fn build_pow_template(
     pubkey: &str,
-    created_at: u32,
-    kind: i64,
-    existing_tags: &Option<String>,
+    created_at: u64,
+    kind: u16,
+    tags: &[Vec<String>],
     content: &str,
     difficulty: u32,
 ) -> (String, String) {
-    let escaped = json_escape(content);
-    let mut prefix = format!("[0,\"{}\",{},{},[", pubkey, created_at, kind);
-    if let Some(tags) = existing_tags {
-        prefix.push_str(tags);
-        prefix.push(',');
-    }
-    prefix.push_str("[\"nonce\",\"");
-
-    let suffix = format!("\",\"{}\"]],\"{}\"]", difficulty, escaped);
-    (prefix, suffix)
+    let full = serialize_event(pubkey, created_at, kind, &with_nonce_tag(tags, "0", difficulty), content);
+    let suffix = format!(
+        "\",\"{}\"]],{}]",
+        difficulty,
+        serde_json::to_string(content).expect("string serialization cannot fail")
+    );
+    let split = full.len() - suffix.len() - 1;
+    assert_eq!(&full[split..], format!("0{suffix}"));
+    (full[..split].to_string(), suffix)
 }
 
 /// Build template for fast mode: nonce varies inside content, nonce tag is fixed to "0".
@@ -252,95 +245,88 @@ fn build_pow_template(
 /// The nonce digits appear right before the closing "], giving a minimal suffix.
 fn build_pow_template_fast(
     pubkey: &str,
-    created_at: u32,
-    kind: i64,
-    existing_tags: &Option<String>,
+    created_at: u64,
+    kind: u16,
+    tags: &[Vec<String>],
     content: &str,
     difficulty: u32,
 ) -> (String, String) {
-    let escaped = json_escape(content);
-    let mut prefix = format!("[0,\"{}\",{},{},[", pubkey, created_at, kind);
-    if let Some(tags) = existing_tags {
-        prefix.push_str(tags);
-        prefix.push(',');
-    }
-    // Fixed nonce tag with value "0", then content with trailing newline before nonce digits
-    prefix.push_str(&format!(
-        "[\"nonce\",\"0\",\"{}\"]],\"{}\\n",
-        difficulty, escaped
-    ));
-
+    let full = serialize_event(
+        pubkey,
+        created_at,
+        kind,
+        &with_nonce_tag(tags, "0", difficulty),
+        &format!("{content}\n"),
+    );
     let suffix = "\"]".to_string();
-    (prefix, suffix)
+    assert!(full.ends_with(&suffix));
+    (full[..full.len() - suffix.len()].to_string(), suffix)
 }
 
-fn unix_now() -> u32 {
+struct MinedEvent {
+    tags: Vec<Vec<String>>,
+    content: String,
+}
+
+fn mined_event(
+    tags: &[Vec<String>],
+    content: &str,
+    nonce: u64,
+    difficulty: u32,
+    fast_mode: bool,
+) -> MinedEvent {
+    if fast_mode {
+        MinedEvent {
+            tags: with_nonce_tag(tags, "0", difficulty),
+            content: format!("{content}\n{nonce}"),
+        }
+    } else {
+        MinedEvent {
+            tags: with_nonce_tag(tags, &nonce.to_string(), difficulty),
+            content: content.to_string(),
+        }
+    }
+}
+
+fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as u32
+        .as_secs()
 }
 
 // ---------------------------------------------------------------------------
 // Nostr event building / publishing
 // ---------------------------------------------------------------------------
 
-fn build_and_sign_event(
+fn sign_event(
     keys: &Keys,
-    created_at: u32,
-    kind: i64,
-    content: &str,
-    event_json: &serde_json::Value,
-    nonce: u64,
-    difficulty: u32,
-    fast_mode: bool,
+    created_at: u64,
+    kind: u16,
+    mined: &MinedEvent,
+    expected_id: &[u8; 32],
 ) -> anyhow::Result<Event> {
-    // Rebuild tags: existing tags from the input + the nonce tag
-    let mut tags: Vec<Tag> = Vec::new();
-
-    if let Some(arr) = event_json["tags"].as_array() {
-        for tag_val in arr {
-            if let Some(tag_arr) = tag_val.as_array() {
-                let parts: Vec<String> = tag_arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-                if !parts.is_empty() {
-                    tags.push(Tag::custom(
-                        TagKind::from(parts[0].as_str()),
-                        parts[1..].to_vec(),
-                    ));
-                }
-            }
-        }
+    let tags = mined
+        .tags
+        .iter()
+        .map(|t| Tag::parse(t.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut unsigned = UnsignedEvent::new(
+        keys.public_key(),
+        Timestamp::from(created_at),
+        Kind::from(kind),
+        tags,
+        mined.content.clone(),
+    );
+    let id = unsigned.id();
+    if id.as_bytes() != expected_id {
+        anyhow::bail!(
+            "signed event ID {} does not match the mined ID {}",
+            id.to_hex(),
+            bytes_to_hex(expected_id)
+        );
     }
-
-    // In fast mode: nonce tag value is "0", nonce is appended to content
-    // In standard mode: nonce tag value is the actual nonce
-    let nonce_tag_value = if fast_mode {
-        "0".to_string()
-    } else {
-        nonce.to_string()
-    };
-
-    tags.push(Tag::custom(
-        TagKind::from("nonce"),
-        vec![nonce_tag_value, difficulty.to_string()],
-    ));
-
-    // In fast mode, the content has the nonce appended
-    let final_content = if fast_mode {
-        format!("{}\n{}", content, nonce)
-    } else {
-        content.to_string()
-    };
-
-    let builder = EventBuilder::new(Kind::from(kind as u16), &final_content)
-        .tags(tags)
-        .custom_created_at(Timestamp::from(created_at as u64));
-
-    let signed = builder.sign_with_keys(keys)?;
-    Ok(signed)
+    Ok(unsigned.sign_with_keys(keys)?)
 }
 
 #[tokio::main]
@@ -413,28 +399,31 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
 
     let mut created_at = event["created_at"]
         .as_u64()
-        .ok_or_else(|| anyhow::anyhow!("missing created_at"))? as u32;
+        .ok_or_else(|| anyhow::anyhow!("missing created_at"))?;
     let kind = event["kind"]
-        .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("missing kind"))?;
-    let content = event["content"].as_str().unwrap_or("");
-
-    // Extract existing tags as raw JSON substring (not via serde re-serialization,
-    // to preserve exact formatting the same way the C++ version does).
-    let existing_tags = extract_tags_inner(&event_json);
+        .as_u64()
+        .and_then(|k| u16::try_from(k).ok())
+        .ok_or_else(|| anyhow::anyhow!("kind must be an integer between 0 and 65535"))?;
+    let content = match event.get("content") {
+        None | Some(serde_json::Value::Null) => "",
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("content must be a string"))?,
+    };
+    let tags = parse_tags(&event)?;
 
     let difficulty = args.difficulty;
     let fast_mode = args.fast;
 
-    let build_template = |pubkey: &str, created_at: u32| -> (String, String) {
+    let build_template = |created_at: u64| -> (String, String) {
         if fast_mode {
-            build_pow_template_fast(pubkey, created_at, kind, &existing_tags, content, difficulty)
+            build_pow_template_fast(&pubkey, created_at, kind, &tags, content, difficulty)
         } else {
-            build_pow_template(pubkey, created_at, kind, &existing_tags, content, difficulty)
+            build_pow_template(&pubkey, created_at, kind, &tags, content, difficulty)
         }
     };
 
-    let (mut prefix, suffix) = build_template(&pubkey, created_at);
+    let (mut prefix, mut suffix) = build_template(created_at);
 
     println!("\nPoW Mining Configuration:");
     println!("  Pubkey:     {}", pubkey);
@@ -449,24 +438,13 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
         prefix.len(),
         suffix.len()
     );
-
-    // CPU verify with nonce=0
-    let test_msg = format!("{}0{}", prefix, suffix);
-    let test_hash = Sha256::digest(test_msg.as_bytes());
-    println!(
-        "  Verify ID:  {} (nonce=0, {} bits)",
-        bytes_to_hex(&test_hash),
-        count_leading_zero_bits(&test_hash)
-    );
     println!();
 
-    // Init GPU miner
     let mut miner = PowMiner::new().ok_or_else(|| anyhow::anyhow!("failed to create GPU miner"))?;
-    miner.init(&prefix, &suffix, difficulty as i32)?;
+    miner.init_on_device(&prefix, &suffix, difficulty, args.device)?;
+    println!("PoW Miner GPU: {}", miner.device_name());
 
-    let nonces_per_batch = miner.nonces_per_batch();
-
-    let mut total_attempts: u64 = 0;
+    let mut earlier_attempts: u64 = 0;
 
     let ts_refresh_secs = 30u64;
     let mut last_ts_refresh = Instant::now();
@@ -479,10 +457,20 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
         ts_refresh_secs
     );
 
+    let mut exhausted = false;
     while running.load(Ordering::SeqCst) {
-        if let Some(result) = miner.mine() {
-            total_attempts += nonces_per_batch;
-            let elapsed_ms = start_time.elapsed().as_millis() as f64;
+        let found = match miner.mine() {
+            Ok(found) => found,
+            Err(rummage_rs::Error::Exhausted) => {
+                exhausted = true;
+                None
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let total_attempts = earlier_attempts + miner.attempts();
+
+        if let Some(result) = found {
+            let elapsed = start_time.elapsed().as_secs_f64();
 
             println!("\n========== PoW FOUND ==========");
             println!("Nonce:      {}", result.nonce);
@@ -490,41 +478,22 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
             println!("Difficulty: {} bits", result.difficulty);
             println!("Timestamp:  {}", created_at);
             println!("Attempts:   {}", total_attempts);
-            println!("Time:       {:.2} seconds", elapsed_ms / 1000.0);
-            if elapsed_ms > 0.0 {
-                println!(
-                    "Rate:       {:.2} MH/s",
-                    total_attempts as f64 / (elapsed_ms / 1000.0) / 1e6
-                );
+            println!("Time:       {:.2} seconds", elapsed);
+            if elapsed > 0.0 {
+                println!("Rate:       {:.2} MH/s", total_attempts as f64 / elapsed / 1e6);
             }
 
-            // CPU verify
-            let full_msg = format!("{}{}{}", prefix, result.nonce, suffix);
+            let mined = mined_event(&tags, content, result.nonce, difficulty, fast_mode);
+            let full_msg = serialize_event(&pubkey, created_at, kind, &mined.tags, &mined.content);
             let cpu_hash = Sha256::digest(full_msg.as_bytes());
             let cpu_bits = count_leading_zero_bits(&cpu_hash);
-            println!(
-                "CPU verify: {} ({} bits) {}",
-                bytes_to_hex(&cpu_hash),
-                cpu_bits,
-                if cpu_bits >= difficulty {
-                    "OK"
-                } else {
-                    "MISMATCH!"
-                }
-            );
+            println!("CPU verify: {} ({} bits)", bytes_to_hex(&cpu_hash), cpu_bits);
+            if cpu_hash.as_slice() != result.event_id || cpu_bits < difficulty {
+                anyhow::bail!("CPU verification failed: the mined nonce does not reproduce the event ID");
+            }
 
-            // Sign and optionally publish with nostr-sdk
             if let Some(ref keys) = keys {
-                let signed_event = build_and_sign_event(
-                    keys,
-                    created_at,
-                    kind,
-                    content,
-                    &event,
-                    result.nonce,
-                    difficulty,
-                    fast_mode,
-                )?;
+                let signed_event = sign_event(keys, created_at, kind, &mined, &result.event_id)?;
 
                 println!("\nSigned event JSON:");
                 println!("{}", signed_event.as_json());
@@ -538,64 +507,47 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
             } else {
                 println!("\nAdd this to your event:");
                 println!("  \"created_at\": {}", created_at);
-                if fast_mode {
-                    println!("  \"content\": \"{}\\n{}\"", content, result.nonce);
-                    println!("  [\"nonce\",\"0\",\"{}\"]", difficulty);
-                } else {
-                    println!("  [\"nonce\",\"{}\",\"{}\"]", result.nonce, difficulty);
-                }
+                println!("  \"tags\": {}", serde_json::to_string(&mined.tags)?);
+                println!("  \"content\": {}", serde_json::to_string(&mined.content)?);
             }
 
             println!("================================");
             return Ok(());
         }
 
-        total_attempts += nonces_per_batch;
-
         let now = Instant::now();
 
-        // Refresh timestamp
-        if now.duration_since(last_ts_refresh) >= Duration::from_secs(ts_refresh_secs) {
-            let new_ts = unix_now();
-            if new_ts != created_at {
-                created_at = new_ts;
-                miner.cleanup();
-
-                let (new_prefix, _new_suffix) = build_template(&pubkey, created_at);
-                prefix = new_prefix;
-                // suffix never changes (doesn't contain created_at)
-
-                miner.init(&prefix, &suffix, difficulty as i32)?;
-                miner.set_nonce_cursor(0);
-                println!("PoW: refreshed created_at to {}, reset nonce", created_at);
-            }
+        if exhausted || now.duration_since(last_ts_refresh) >= Duration::from_secs(ts_refresh_secs) {
+            exhausted = false;
+            let new_ts = unix_now().max(created_at + 1);
+            created_at = new_ts;
+            (prefix, suffix) = build_template(created_at);
+            earlier_attempts += miner.attempts();
+            miner.init_on_device(&prefix, &suffix, difficulty, args.device)?;
+            println!("PoW: refreshed created_at to {}, reset nonce", created_at);
             last_ts_refresh = now;
         }
 
-        // Progress report
         if now.duration_since(last_report) > Duration::from_secs(5) {
-            let total_ms = start_time.elapsed().as_millis() as f64;
-            let rate = if total_ms > 0.0 {
-                total_attempts as f64 / (total_ms / 1000.0)
+            let total_attempts = earlier_attempts + miner.attempts();
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let rate = if elapsed > 0.0 {
+                total_attempts as f64 / elapsed
             } else {
                 0.0
             };
-            let nonce_cursor = miner.nonce_cursor();
             let eta = if rate > 0.0 {
                 let expected_hashes = 2.0_f64.powi(difficulty as i32);
                 let remaining = (expected_hashes - total_attempts as f64).max(0.0);
-                let eta_secs = remaining / rate;
-                format_duration(eta_secs)
+                format_duration(remaining / rate)
             } else {
                 "unknown".to_string()
             };
             println!(
-                "PoW: {} attempts, {:.2} MH/s, ETA ~{}, nonce range [{}..{})",
+                "PoW: {} attempts, {:.2} MH/s, ETA ~{}",
                 total_attempts,
                 rate / 1e6,
                 eta,
-                nonce_cursor.saturating_sub(nonces_per_batch),
-                nonce_cursor
             );
             last_report = now;
         }
@@ -603,7 +555,7 @@ fn run_pow(args: PowArgs) -> anyhow::Result<()> {
 
     println!(
         "\nPoW mining stopped. No solution found after {} attempts.",
-        total_attempts
+        earlier_attempts + miner.attempts()
     );
     Ok(())
 }
@@ -733,7 +685,7 @@ fn run_vanity(args: VanityArgs) -> anyhow::Result<()> {
         println!("{}", bytes_to_hex(&start_offset));
         println!("WARNING: This offset will be saved in the checkpoint file - protect it!\n");
     } else {
-        let ts = unix_now() as u64;
+        let ts = unix_now();
         start_offset[24..32].copy_from_slice(&ts.to_le_bytes());
         resuming_from_checkpoint = false;
     }
@@ -890,126 +842,47 @@ mod tests {
 
     const TEST_PUBKEY: &str =
         "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-    const TEST_TS: u32 = 1700000000;
+    const TEST_TS: u64 = 1700000000;
 
-    // -----------------------------------------------------------------------
-    // json_escape
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn json_escape_plain_ascii() {
-        assert_eq!(json_escape("hello world"), "hello world");
-    }
-
-    #[test]
-    fn json_escape_quotes_and_backslash() {
-        assert_eq!(json_escape(r#"say "hello""#), r#"say \"hello\""#);
-        assert_eq!(json_escape(r"back\slash"), r"back\\slash");
-    }
-
-    #[test]
-    fn json_escape_newline_tab_cr() {
-        assert_eq!(json_escape("line1\nline2"), r"line1\nline2");
-        assert_eq!(json_escape("col1\tcol2"), r"col1\tcol2");
-        assert_eq!(json_escape("cr\rhere"), r"cr\rhere");
-    }
-
-    #[test]
-    fn json_escape_control_chars() {
-        // NUL, BEL, etc. should become \u00XX
-        assert_eq!(json_escape("\x00"), r"\u0000");
-        assert_eq!(json_escape("\x07"), r"\u0007");
-        assert_eq!(json_escape("\x1f"), r"\u001f");
-    }
-
-    #[test]
-    fn json_escape_unicode_passthrough() {
-        // Unicode chars above U+001F should pass through unescaped
-        assert_eq!(json_escape("こんにちは"), "こんにちは");
-        assert_eq!(json_escape("🤙⚡"), "🤙⚡");
-        assert_eq!(json_escape("Ñoño"), "Ñoño");
-    }
-
-    #[test]
-    fn json_escape_mixed() {
-        assert_eq!(
-            json_escape("he said \"こんにちは\"\nnew line"),
-            r#"he said \"こんにちは\"\nnew line"#
-        );
+    fn tags(json: &str) -> Vec<Vec<String>> {
+        let event: serde_json::Value = serde_json::from_str(json).unwrap();
+        parse_tags(&event).unwrap()
     }
 
     // -----------------------------------------------------------------------
-    // extract_tags_inner
+    // parse_tags
     // -----------------------------------------------------------------------
 
     #[test]
-    fn extract_tags_empty_array() {
-        let json = r#"{"tags":[],"content":"hi"}"#;
-        assert_eq!(extract_tags_inner(json), None);
+    fn parse_tags_missing_or_empty() {
+        assert!(tags(r#"{"content":"hi"}"#).is_empty());
+        assert!(tags(r#"{"tags":[],"content":"hi"}"#).is_empty());
     }
 
     #[test]
-    fn extract_tags_single_tag() {
-        let json = r#"{"tags":[["p","abc"]],"content":"hi"}"#;
-        assert_eq!(
-            extract_tags_inner(json),
-            Some(r#"["p","abc"]"#.to_string())
-        );
+    fn parse_tags_ignores_whitespace_and_brackets_in_strings() {
+        let parsed = tags(r#"{"tags": [ ["t", "[test]"] , ["d","arr[0]"] ], "content": "\"tags\":[1]"}"#);
+        assert_eq!(parsed, vec![vec!["t", "[test]"], vec!["d", "arr[0]"]]);
     }
 
     #[test]
-    fn extract_tags_multiple_tags() {
-        let json = r#"{"tags":[["p","abc"],["e","def"]],"content":"hi"}"#;
-        assert_eq!(
-            extract_tags_inner(json),
-            Some(r#"["p","abc"],["e","def"]"#.to_string())
-        );
+    fn parse_tags_keeps_escaped_quotes() {
+        let parsed = tags(r#"{"tags":[["t","say \"hi\""]],"content":"x"}"#);
+        assert_eq!(parsed, vec![vec!["t", "say \"hi\""]]);
     }
 
     #[test]
-    fn extract_tags_with_brackets_in_strings() {
-        // Tag values containing bracket characters — should NOT confuse the parser
-        let json = r#"{"tags":[["t","[test]"],["d","arr[0]"]],"content":"hi"}"#;
-        assert_eq!(
-            extract_tags_inner(json),
-            Some(r#"["t","[test]"],["d","arr[0]"]"#.to_string())
-        );
+    fn parse_tags_drops_existing_nonce_tags() {
+        let parsed = tags(r#"{"tags":[["nonce","5","8"],["p","ab"]],"content":"x"}"#);
+        assert_eq!(parsed, vec![vec!["p", "ab"]]);
     }
 
     #[test]
-    fn extract_tags_with_escaped_quotes_in_strings() {
-        // Tag values containing escaped quotes
-        let json = r#"{"tags":[["t","say \"hi\""]],"content":"x"}"#;
-        assert_eq!(
-            extract_tags_inner(json),
-            Some(r#"["t","say \"hi\""]"#.to_string())
-        );
-    }
-
-    #[test]
-    fn extract_tags_with_nested_json_in_string() {
-        // A tag value that is itself a JSON string containing brackets
-        let json = r#"{"tags":[["description","{\"name\":\"test\",\"arr\":[1,2,3]}"]],"content":""}"#;
-        assert_eq!(
-            extract_tags_inner(json),
-            Some(r#"["description","{\"name\":\"test\",\"arr\":[1,2,3]}"]"#.to_string())
-        );
-    }
-
-    #[test]
-    fn extract_tags_whitespace_preserved() {
-        // Whitespace inside the tags array should be preserved
-        let json = r#"{"tags": [ ["p", "abc"] ], "content": "hi"}"#;
-        assert_eq!(
-            extract_tags_inner(json),
-            Some(r#"["p", "abc"]"#.to_string())
-        );
-    }
-
-    #[test]
-    fn extract_tags_no_tags_key() {
-        let json = r#"{"content":"hi"}"#;
-        assert_eq!(extract_tags_inner(json), None);
+    fn parse_tags_rejects_non_strings() {
+        let event: serde_json::Value = serde_json::from_str(r#"{"tags":[["t",1]]}"#).unwrap();
+        assert!(parse_tags(&event).is_err());
+        let event: serde_json::Value = serde_json::from_str(r#"{"tags":[[]]}"#).unwrap();
+        assert!(parse_tags(&event).is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -1019,7 +892,7 @@ mod tests {
     #[test]
     fn template_standard_no_tags() {
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, "hello", 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], "hello", 21);
         // prefix ends with ["nonce","
         assert!(prefix.ends_with("[\"nonce\",\""));
         // Inserting nonce "42" should give valid NIP-01 serialization
@@ -1035,7 +908,7 @@ mod tests {
 
     #[test]
     fn template_standard_with_tags() {
-        let tags = Some(r#"["p","deadbeef"]"#.to_string());
+        let tags = tags(r#"{"tags":[["p","deadbeef"]]}"#);
         let (prefix, suffix) =
             build_pow_template(TEST_PUBKEY, TEST_TS, 1, &tags, "gm", 32);
         let full = format!("{}99{}", prefix, suffix);
@@ -1051,7 +924,7 @@ mod tests {
     #[test]
     fn template_fast_no_tags() {
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, "hello", 21);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], "hello", 21);
         assert_eq!(suffix, "\"]");
         let full = format!("{}42{}", prefix, suffix);
         assert_eq!(
@@ -1065,7 +938,7 @@ mod tests {
 
     #[test]
     fn template_fast_with_tags() {
-        let tags = Some(r#"["e","cafebabe"]"#.to_string());
+        let tags = tags(r#"{"tags":[["e","cafebabe"]]}"#);
         let (prefix, suffix) =
             build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &tags, "gm", 40);
         let full = format!("{}12345{}", prefix, suffix);
@@ -1086,7 +959,7 @@ mod tests {
     fn template_content_with_quotes() {
         let content = r#"he said "hello""#; // unescaped content from serde
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         // The content in the serialization must have escaped quotes
         assert!(full.contains(r#"\"he said \\\"hello\\\"\""#) || full.contains(r#""he said \"hello\""]"#));
@@ -1104,7 +977,7 @@ mod tests {
     fn template_content_with_backslash() {
         let content = r"C:\Users\nostr"; // unescaped
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert_eq!(
             full,
@@ -1119,7 +992,7 @@ mod tests {
     fn template_content_with_newlines() {
         let content = "line1\nline2\nline3"; // unescaped newlines
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert_eq!(
             full,
@@ -1134,7 +1007,7 @@ mod tests {
     fn template_content_with_tabs() {
         let content = "col1\tcol2";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"col1\\tcol2\"]"));
     }
@@ -1147,7 +1020,7 @@ mod tests {
     fn template_content_japanese() {
         let content = "こんにちは世界";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"こんにちは世界\"]"));
     }
@@ -1156,7 +1029,7 @@ mod tests {
     fn template_content_chinese() {
         let content = "你好世界";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"你好世界\"]"));
     }
@@ -1165,7 +1038,7 @@ mod tests {
     fn template_content_arabic() {
         let content = "مرحبا بالعالم";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"مرحبا بالعالم\"]"));
     }
@@ -1174,7 +1047,7 @@ mod tests {
     fn template_content_emoji() {
         let content = "gm ☀️ nostr 🤙⚡🫂";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"gm ☀️ nostr 🤙⚡🫂\"]"));
     }
@@ -1183,7 +1056,7 @@ mod tests {
     fn template_content_korean() {
         let content = "안녕하세요";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"안녕하세요\"]"));
     }
@@ -1192,7 +1065,7 @@ mod tests {
     fn template_content_mixed_scripts() {
         let content = "Hello 世界 مرحبا 🌍";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"Hello 世界 مرحبا 🌍\"]"));
     }
@@ -1206,7 +1079,7 @@ mod tests {
         // Content is a JSON object as a string (like a kind 0 metadata)
         let content = r#"{"name":"satoshi","about":"[creator]"}"#;
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 0, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 0, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert_eq!(
             full,
@@ -1221,7 +1094,7 @@ mod tests {
     fn template_content_code_snippet() {
         let content = "fn main() {\n    println!(\"hello\");\n}";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         // Should have escaped newlines and escaped quotes
         assert!(full.contains("fn main() {\\n    println!(\\\"hello\\\");\\n}"));
@@ -1235,7 +1108,7 @@ mod tests {
     fn template_content_html() {
         let content = "<script>alert(\"xss\")</script>";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with(
             "\"<script>alert(\\\"xss\\\")</script>\"]"
@@ -1246,7 +1119,7 @@ mod tests {
     fn template_content_markdown_with_brackets() {
         let content = "Check [this](https://example.com) and `arr[0]`";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         // Brackets and parens don't need escaping in JSON
         assert!(full.ends_with(
@@ -1258,7 +1131,7 @@ mod tests {
     fn template_content_sql_injection() {
         let content = "Robert'); DROP TABLE students;--";
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}0{}", prefix, suffix);
         assert!(full.ends_with("\"Robert'); DROP TABLE students;--\"]"));
     }
@@ -1271,7 +1144,7 @@ mod tests {
     fn template_fast_content_with_quotes() {
         let content = r#"he said "gm""#;
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}42{}", prefix, suffix);
         assert_eq!(
             full,
@@ -1286,7 +1159,7 @@ mod tests {
     fn template_fast_content_with_unicode() {
         let content = "⚡ zapping ⚡";
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}99{}", prefix, suffix);
         assert!(full.contains("⚡ zapping ⚡\\n99\"]"));
     }
@@ -1295,7 +1168,7 @@ mod tests {
     fn template_fast_content_with_newlines() {
         let content = "line1\nline2";
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}7{}", prefix, suffix);
         // The original newline in content is escaped, then \n separator, then nonce
         assert!(full.ends_with("\"line1\\nline2\\n7\"]"));
@@ -1305,7 +1178,7 @@ mod tests {
     fn template_fast_content_json() {
         let content = r#"{"key":"value"}"#;
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, 21);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], content, 21);
         let full = format!("{}1{}", prefix, suffix);
         assert!(full.ends_with(
             "\"{\\\"key\\\":\\\"value\\\"}\\n1\"]"
@@ -1320,8 +1193,8 @@ mod tests {
     /// and verify it matches what our template produces.
     fn reference_nip01_serialize(
         pubkey: &str,
-        created_at: u32,
-        kind: i64,
+        created_at: u64,
+        kind: u16,
         tags: &serde_json::Value,
         content: &str,
     ) -> String {
@@ -1356,7 +1229,7 @@ mod tests {
         );
 
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, difficulty);
         let template_result = format!("{}{}{}", prefix, nonce, suffix);
 
         assert_eq!(template_result, reference);
@@ -1385,7 +1258,7 @@ mod tests {
         );
 
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, difficulty);
         let template_result = format!("{}{}{}", prefix, nonce, suffix);
 
         assert_eq!(template_result, reference);
@@ -1409,7 +1282,7 @@ mod tests {
         );
 
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 0, &None, content, difficulty);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 0, &[], content, difficulty);
         let template_result = format!("{}{}{}", prefix, nonce, suffix);
 
         assert_eq!(template_result, reference);
@@ -1433,7 +1306,7 @@ mod tests {
         );
 
         let (prefix, suffix) =
-            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+            build_pow_template(TEST_PUBKEY, TEST_TS, 1, &[], content, difficulty);
         let template_result = format!("{}{}{}", prefix, nonce, suffix);
 
         assert_eq!(template_result, reference);
@@ -1445,8 +1318,7 @@ mod tests {
         let nonce = 100u64;
         let difficulty = 21u32;
 
-        // The existing tags as raw JSON (what extract_tags_inner would return)
-        let existing_tags = Some(r#"["p","aabbccdd"],["e","11223344"]"#.to_string());
+                let existing_tags = tags(r#"{"tags":[["p","aabbccdd"],["e","11223344"]]}"#);
 
         let tags_json: serde_json::Value = serde_json::json!([
             ["p", "aabbccdd"],
@@ -1495,7 +1367,7 @@ mod tests {
         );
 
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], content, difficulty);
         let template_result = format!("{}{}{}", prefix, nonce, suffix);
 
         assert_eq!(template_result, reference);
@@ -1520,7 +1392,7 @@ mod tests {
         );
 
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], content, difficulty);
         let template_result = format!("{}{}{}", prefix, nonce, suffix);
 
         assert_eq!(template_result, reference);
@@ -1545,7 +1417,7 @@ mod tests {
         );
 
         let (prefix, suffix) =
-            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &None, content, difficulty);
+            build_pow_template_fast(TEST_PUBKEY, TEST_TS, 1, &[], content, difficulty);
         let template_result = format!("{}{}{}", prefix, nonce, suffix);
 
         assert_eq!(template_result, reference);
@@ -1557,7 +1429,7 @@ mod tests {
         let nonce = 50u64;
         let difficulty = 21u32;
 
-        let existing_tags = Some(r#"["t","nostr"]"#.to_string());
+        let existing_tags = tags(r#"{"tags":[["t","nostr"]]}"#);
         let fast_content = format!("{}\n{}", content, nonce);
 
         let tags_json: serde_json::Value = serde_json::json!([
@@ -1595,10 +1467,10 @@ mod tests {
     fn verify_pipeline(input_json: &str, nonce: u64, difficulty: u32, fast: bool) {
         let event: serde_json::Value = serde_json::from_str(input_json).unwrap();
         let pubkey = event["pubkey"].as_str().unwrap();
-        let created_at = event["created_at"].as_u64().unwrap() as u32;
-        let kind = event["kind"].as_i64().unwrap();
+        let created_at = event["created_at"].as_u64().unwrap();
+        let kind = event["kind"].as_u64().unwrap() as u16;
         let content = event["content"].as_str().unwrap_or("");
-        let existing_tags = extract_tags_inner(input_json);
+        let existing_tags = parse_tags(&event).unwrap();
 
         let (prefix, suffix) = if fast {
             build_pow_template_fast(pubkey, created_at, kind, &existing_tags, content, difficulty)
