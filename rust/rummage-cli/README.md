@@ -48,5 +48,5 @@ rummage pow --event '{"pubkey":"<hex>","created_at":1735000000,"kind":1,"tags":[
 
 On an RTX PRO 6000 (Blackwell):
 
-- **PoW**: ~8,000 MH/s
+- **PoW**: ~4,900 MH/s for a 213 character note, ~18,000 MH/s with `--fast`
 - **Vanity**: ~240M keys/sec
